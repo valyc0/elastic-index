@@ -5,7 +5,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>4.0.1</version>
+        <version>3.4.1</version>
         <relativePath /><!-- lookup parent from repository -->
     </parent>
     <groupId>io.bootify</groupId>
@@ -14,7 +14,7 @@
     <name>my-app</name>
 
     <properties>
-        <java.version>21</java.version>
+        <java.version>17</java.version>
         <elasticsearch-java.version>8.11.3</elasticsearch-java.version>
         <elasticsearch-rest-client.version>8.11.3</elasticsearch-rest-client.version>
     </properties>
