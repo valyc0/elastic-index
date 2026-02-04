@@ -1,6 +1,7 @@
 package io.bootify.my_app.model;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import java.util.Map;
 
 public class DocumentChunk {
 
@@ -24,6 +25,9 @@ public class DocumentChunk {
 
     @JsonProperty("page")
     private Integer page;
+
+    @JsonProperty("metadata")
+    private Map<String, String> metadata;
 
     public DocumentChunk() {
     }
@@ -91,5 +95,13 @@ public class DocumentChunk {
 
     public void setPage(Integer page) {
         this.page = page;
+    }
+
+    public Map<String, String> getMetadata() {
+        return metadata;
+    }
+
+    public void setMetadata(Map<String, String> metadata) {
+        this.metadata = metadata;
     }
 }

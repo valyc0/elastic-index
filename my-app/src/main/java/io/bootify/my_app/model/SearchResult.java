@@ -12,6 +12,8 @@ public class SearchResult {
     private List<String> highlights;
     private Float score;
     private String language;
+    private Map<String, String> metadata;
+    private String explanation;
 
     public SearchResult() {
     }
@@ -70,5 +72,21 @@ public class SearchResult {
 
     public void setLanguage(String language) {
         this.language = language;
+    }
+
+    public Map<String, String> getMetadata() {
+        return metadata;
+    }
+
+    public void setMetadata(Map<String, String> metadata) {
+        this.metadata = metadata;
+    }
+
+    public String getExplanation() {
+        return explanation;
+    }
+
+    public void setExplanation(String explanation) {
+        this.explanation = explanation;
     }
 }

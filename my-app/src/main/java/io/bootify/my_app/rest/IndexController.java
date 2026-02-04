@@ -48,11 +48,14 @@ public class IndexController {
             String documentId = UUID.randomUUID().toString();
             
             log.info("Starting indexing with document ID: {}", documentId);
+            log.info("Metadata available: {}", result.getMetadata() != null ? result.getMetadata().size() + " fields" : "none");
+            
             // Indicizza su Elasticsearch
             elasticsearchIndexService.indexDocument(
                 documentId,
                 result.getFileName(),
-                result.getText()
+                result.getText(),
+                result.getMetadata()
             );
 
             log.info("Document indexed successfully with ID: {}", documentId);
@@ -71,11 +74,13 @@ public class IndexController {
             
             String documentId = UUID.randomUUID().toString();
             log.info("Starting indexing with document ID: {}", documentId);
+            log.info("Metadata available: {}", extraction.getMetadata() != null ? extraction.getMetadata().size() + " fields" : "none");
             
             elasticsearchIndexService.indexDocument(
                 documentId,
                 extraction.getFileName(),
-                extraction.getText()
+                extraction.getText(),
+                extraction.getMetadata()
             );
 
             log.info("Document indexed successfully with ID: {}", documentId);

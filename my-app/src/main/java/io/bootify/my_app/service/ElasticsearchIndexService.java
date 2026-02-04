@@ -41,12 +41,17 @@ public class ElasticsearchIndexService {
         this.elasticsearchClient = elasticsearchClient;
     }
 
-    public void indexDocument(String documentId, String fileName, String extractedText) {
+    public void indexDocument(String documentId, String fileName, String extractedText, java.util.Map<String, String> metadata) {
         List<String> chunks = ChunkingUtils.chunk(extractedText);
+        
+        // Estrae la lingua dai metadati Tika se disponibile, altrimenti usa il rilevamento automatico
+        String documentLanguage = extractLanguageFromMetadata(metadata);
 
         for (int i = 0; i < chunks.size(); i++) {
             String chunkText = chunks.get(i);
-            String language = languageDetectionService.detect(chunkText);
+            
+            // Usa la lingua dai metadati se disponibile, altrimenti rileva per chunk
+            String language = documentLanguage != null ? documentLanguage : languageDetectionService.detect(chunkText);
 
             DocumentChunk chunk = new DocumentChunk();
             chunk.setId(UUID.randomUUID().toString());
@@ -55,6 +60,7 @@ public class ElasticsearchIndexService {
             chunk.setContent(chunkText);
             chunk.setLanguage(language);
             chunk.setFileName(fileName);
+            chunk.setMetadata(metadata);
 
             String indexName = indexNameResolver.resolve(chunk);
             
@@ -64,6 +70,30 @@ public class ElasticsearchIndexService {
                 throw new RuntimeException("Failed to index chunk", e);
             }
         }
+    }
+    
+    /**
+     * Estrae la lingua dai metadati Tika.
+     * Cerca vari campi comuni dove Tika può mettere l'informazione sulla lingua.
+     */
+    private String extractLanguageFromMetadata(java.util.Map<String, String> metadata) {
+        if (metadata == null || metadata.isEmpty()) {
+            return null;
+        }
+        
+        // Controlla vari possibili campi di metadati per la lingua
+        String[] languageFields = {"language", "Language", "dc:language", "Content-Language"};
+        
+        for (String field : languageFields) {
+            String lang = metadata.get(field);
+            if (lang != null && !lang.trim().isEmpty()) {
+                log.info("Language found in metadata ({}): {}", field, lang);
+                return lang;
+            }
+        }
+        
+        log.info("No language found in metadata, will use automatic detection");
+        return null;
     }
 
     private void indexChunkViaRest(String indexName, DocumentChunk chunk) throws Exception {

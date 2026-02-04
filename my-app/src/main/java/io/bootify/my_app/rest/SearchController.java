@@ -43,17 +43,46 @@ public class SearchController {
     @PostMapping("/advanced")
     public ResponseEntity<List<SearchResult>> advancedSearch(@RequestBody SearchRequest request) {
         try {
-            log.info("Advanced search request: query='{}', language='{}'", request.getQuery(), request.getLanguage());
+            log.info("Advanced search request: query='{}', language='{}', explain={}, metadataFilters={}", 
+                request.getQuery(), request.getLanguage(), request.getExplain(), request.getMetadataFilters());
             int size = request.getSize() != null ? request.getSize() : 10;
+            boolean explain = request.getExplain() != null && request.getExplain();
             List<SearchResult> results = searchService.searchAdvanced(
                 request.getQuery(),
                 request.getLanguage(),
-                size
+                size,
+                explain,
+                request.getMetadataFilters()
             );
             log.info("Advanced search completed: {} results", results.size());
             return ResponseEntity.ok(results);
         } catch (Exception e) {
             log.error("Error in advanced search", e);
+            return ResponseEntity.status(500).build();
+        }
+    }
+    
+    @PostMapping("/by-metadata")
+    public ResponseEntity<List<SearchResult>> searchByMetadata(@RequestBody SearchRequest request) {
+        try {
+            log.info("Search by metadata request: metadataFilters={}, language='{}'", 
+                request.getMetadataFilters(), request.getLanguage());
+            
+            if (request.getMetadataFilters() == null || request.getMetadataFilters().isEmpty()) {
+                log.warn("No metadata filters provided");
+                return ResponseEntity.badRequest().build();
+            }
+            
+            int size = request.getSize() != null ? request.getSize() : 10;
+            List<SearchResult> results = searchService.searchByMetadata(
+                request.getMetadataFilters(),
+                request.getLanguage(),
+                size
+            );
+            log.info("Metadata search completed: {} results", results.size());
+            return ResponseEntity.ok(results);
+        } catch (Exception e) {
+            log.error("Error in metadata search", e);
             return ResponseEntity.status(500).build();
         }
     }

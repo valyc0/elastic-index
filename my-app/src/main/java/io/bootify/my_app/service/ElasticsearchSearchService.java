@@ -60,49 +60,86 @@ public class ElasticsearchSearchService {
     }
 
     public List<SearchResult> searchAdvanced(String queryText, String language, int size) {
-        log.info("Advanced search: query='{}', language='{}', size={}", queryText, language, size);
+        return searchAdvanced(queryText, language, size, false, null);
+    }
+    
+    public List<SearchResult> searchAdvanced(String queryText, String language, int size, boolean explain) {
+        return searchAdvanced(queryText, language, size, explain, null);
+    }
+    
+    public List<SearchResult> searchAdvanced(String queryText, String language, int size, boolean explain, Map<String, String> metadataFilters) {
+        log.info("Advanced search: query='{}', language='{}', size={}, explain={}, metadataFilters={}", 
+            queryText, language, size, explain, metadataFilters);
         String indexName = resolveIndexName(language);
         
-        return searchViaClient(indexName, queryText, size);
+        return searchViaClient(indexName, queryText, size, explain, metadataFilters);
+    }
+    
+    public List<SearchResult> searchByMetadata(Map<String, String> metadataFilters, String language, int size) {
+        log.info("Search by metadata: filters={}, language='{}', size={}", metadataFilters, language, size);
+        String indexName = resolveIndexName(language);
+        
+        return searchByMetadataOnly(indexName, metadataFilters, size);
     }
     
     /**
      * Ricerca usando il client ufficiale Elasticsearch invece di REST diretto.
      * Metodo type-safe con API fluent.
+     * Raggruppa i risultati per fileName usando collapse e restituisce solo il chunk con score più alto per ogni file.
      */
-    private List<SearchResult> searchViaClient(String indexName, String queryText, int size) {
+    private List<SearchResult> searchViaClient(String indexName, String queryText, int size, boolean explain, Map<String, String> metadataFilters) {
         try {
             log.debug("Searching via Elasticsearch Client in index: {}", indexName);
             
-            // Costruisce la query con l'API fluent
+            // Costruisce la query con l'API fluent usando collapse per raggruppare per fileName
             SearchRequest searchRequest = SearchRequest.of(s -> s
                 .index(indexName)
                 .size(size)
+                .explain(explain)
                 .query(q -> q
-                    .bool(b -> b
-                        .should(Query.of(sq -> sq
-                            .match(m -> m
-                                .field("content")
-                                .query(queryText)
-                                .boost(3.0f)
-                            )
-                        ))
-                        .should(Query.of(sq -> sq
-                            .match(m -> m
-                                .field("content")
-                                .query(queryText)
-                                .fuzziness("AUTO")
-                                .boost(1.0f)
-                            )
-                        ))
-                        .should(Query.of(sq -> sq
-                            .match(m -> m
-                                .field("fileName")
-                                .query(queryText)
-                                .boost(5.0f)
-                            )
-                        ))
-                    )
+                    .bool(b -> {
+                        var builder = b
+                            .should(Query.of(sq -> sq
+                                .match(m -> m
+                                    .field("content")
+                                    .query(queryText)
+                                    .boost(3.0f)
+                                )
+                            ))
+                            .should(Query.of(sq -> sq
+                                .match(m -> m
+                                    .field("content")
+                                    .query(queryText)
+                                    .fuzziness("AUTO")
+                                    .boost(1.0f)
+                                )
+                            ))
+                            .should(Query.of(sq -> sq
+                                .match(m -> m
+                                    .field("fileName")
+                                    .query(queryText)
+                                    .boost(5.0f)
+                                )
+                            ));
+                        
+                        // Aggiungi filtri metadati se presenti
+                        if (metadataFilters != null && !metadataFilters.isEmpty()) {
+                            for (Map.Entry<String, String> entry : metadataFilters.entrySet()) {
+                                String fieldPath = "metadata." + entry.getKey();
+                                builder = builder.filter(Query.of(fq -> fq
+                                    .term(t -> t
+                                        .field(fieldPath)
+                                        .value(entry.getValue())
+                                    )
+                                ));
+                            }
+                        }
+                        
+                        return builder;
+                    })
+                )
+                .collapse(c -> c
+                    .field("fileName.keyword")
                 )
                 .highlight(h -> h
                     .fields("content", f -> f
@@ -138,6 +175,12 @@ public class ElasticsearchSearchService {
             result.setContent(chunk.getContent());
             result.setLanguage(chunk.getLanguage());
             result.setScore(hit.score() != null ? hit.score().floatValue() : 0.0f);
+            result.setMetadata(chunk.getMetadata());
+            
+            // Extract explanation if available
+            if (hit.explanation() != null) {
+                result.setExplanation(hit.explanation().toString());
+            }
             
             // Extract highlights
             List<String> highlights = new ArrayList<>();
@@ -148,6 +191,10 @@ public class ElasticsearchSearchService {
             
             results.add(result);
         }
+        
+        // I risultati sono già raggruppati per fileName da Elasticsearch collapse
+        // e ordinati per score decrescente
+        log.info("Returning {} unique documents (collapsed by fileName)", results.size());
         
         return results;
     }
@@ -192,6 +239,16 @@ public class ElasticsearchSearchService {
             result.setLanguage(source.path("language").asText());
             result.setScore(hit.path("_score").floatValue());
             
+            // Extract metadata
+            Map<String, String> metadata = new HashMap<>();
+            JsonNode metadataNode = source.path("metadata");
+            if (metadataNode.isObject()) {
+                metadataNode.fields().forEachRemaining(entry -> 
+                    metadata.put(entry.getKey(), entry.getValue().asText())
+                );
+            }
+            result.setMetadata(metadata);
+            
             // Extract highlights
             List<String> highlights = new ArrayList<>();
             JsonNode highlightNode = hit.path("highlight").path("content");
@@ -208,6 +265,53 @@ public class ElasticsearchSearchService {
         return results;
     }
 
+    /**
+     * Ricerca solo per metadati senza query testuale.
+     */
+    private List<SearchResult> searchByMetadataOnly(String indexName, Map<String, String> metadataFilters, int size) {
+        try {
+            log.debug("Searching by metadata only in index: {}", indexName);
+            
+            SearchRequest searchRequest = SearchRequest.of(s -> s
+                .index(indexName)
+                .size(size)
+                .query(q -> q
+                    .bool(b -> {
+                        var builder = b.must(Query.of(mq -> mq.matchAll(ma -> ma)));
+                        
+                        // Aggiungi filtri metadati
+                        if (metadataFilters != null && !metadataFilters.isEmpty()) {
+                            for (Map.Entry<String, String> entry : metadataFilters.entrySet()) {
+                                String fieldPath = "metadata." + entry.getKey();
+                                builder = builder.filter(Query.of(fq -> fq
+                                    .term(t -> t
+                                        .field(fieldPath)
+                                        .value(entry.getValue())
+                                    )
+                                ));
+                            }
+                        }
+                        
+                        return builder;
+                    })
+                )
+                .collapse(c -> c
+                    .field("fileName.keyword")
+                )
+            );
+            
+            SearchResponse<DocumentChunk> response = elasticsearchClient.search(searchRequest, DocumentChunk.class);
+            
+            log.info("Metadata search completed: {} hits found", response.hits().total().value());
+            
+            return parseClientSearchResults(response);
+            
+        } catch (Exception e) {
+            log.error("Error during metadata search: {}", e.getMessage(), e);
+            return new ArrayList<>();
+        }
+    }
+    
     private String resolveIndexName(String language) {
         if (language == null || language.isEmpty()) {
             return "files_*";
