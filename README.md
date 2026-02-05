@@ -67,6 +67,7 @@ Ogni chunk viene indicizzato con:
 - Java 21
 - Maven 3.8+
 - Docker e Docker Compose
+- curl e jq (per gli script di test)
 
 ### Avvio
 
@@ -90,20 +91,352 @@ curl http://localhost:8080/actuator/health
 curl http://localhost:9200/_cluster/health
 ```
 
-### Test Completo
+## 🔧 Script Shell - Guida Completa
 
-Usa lo script di test automatico:
+Il progetto include diversi script Bash per automatizzare operazioni comuni. Tutti gli script devono essere eseguiti dalla directory principale del progetto.
 
+### 1. run-and-test.sh - Avvio e Test Automatico
+
+**Scopo**: Avvia l'applicazione Spring Boot e esegue i test automatici.
+
+**Uso**:
 ```bash
 ./run-and-test.sh
 ```
 
-Oppure singolarmente:
+**Cosa fa**:
+1. Termina eventuali istanze precedenti dell'applicazione
+2. Avvia Spring Boot in background
+3. Attende 20 secondi per il completo avvio
+4. Esegue automaticamente `test-elastic.sh`
+5. Mostra i log in caso di errori
 
+**Output**:
+```
+=== Avvio completo e test ===
+Avvio applicazione (PID: 12345)...
+Attesa 20 secondi per startup completo...
+✓ Applicazione avviata su porta 8080
+```
+
+**Note**: 
+- I log dell'applicazione sono salvati in `/tmp/spring-app.log`
+- Utile per reset completo dell'ambiente di sviluppo
+
+---
+
+### 2. test-upload.sh - Upload PDF
+
+**Scopo**: Carica un file PDF ed estrae il testo usando Apache Tika.
+
+**Uso**:
+```bash
+./test-upload.sh <path-al-file.pdf>
+```
+
+**Esempio**:
+```bash
+./test-upload.sh ventimila-leghe.pdf
+./test-upload.sh "Zanna Bianca (1).pdf"
+```
+
+**Cosa fa**:
+1. Verifica che il file esista
+2. Invia il PDF all'endpoint `/api/documents/extract`
+3. Mostra il JSON risultante con testo estratto e metadata
+4. Salva automaticamente il JSON in `my-app/extracted-documents/`
+
+**Output esempio**:
+```json
+{
+  "fileName": "ventimila-leghe.pdf",
+  "text": "Ventimila leghe sotto i mari...",
+  "contentType": "application/pdf",
+  "metadata": {
+    "Author": "Jules Verne",
+    "Title": "Ventimila leghe sotto i mari"
+  }
+}
+```
+
+**Errori comuni**:
+```bash
+# File non trovato
+Errore: File 'documento.pdf' non trovato
+
+# Nome file mancante
+Uso: ./test-upload.sh <path-al-file.pdf>
+```
+
+---
+
+### 3. load-documents.sh - Caricamento Batch
+
+**Scopo**: Indicizza tutti i file JSON dalla directory `extracted-documents/`.
+
+**Uso**:
+```bash
+./load-documents.sh
+```
+
+**Cosa fa**:
+1. Verifica che l'applicazione sia in esecuzione
+2. Se non lo è, la avvia automaticamente
+3. Attende che l'applicazione sia pronta (max 30 secondi)
+4. Carica tutti i file `*.json` da `my-app/extracted-documents/`
+5. Mostra la risposta per ogni file indicizzato
+
+**Output esempio**:
+```
+Applicazione pronta!
+
+Caricamento di ventimila-leghe.pdf_20260120_192148.json...
+Risposta: Documento indicizzato con ID: abc-123
+
+Caricamento di Zanna_Bianca__1_.pdf_20260204_183611.json...
+Risposta: Documento indicizzato con ID: def-456
+
+Caricamento completato!
+```
+
+**Quando usarlo**:
+- Dopo aver estratto più PDF con `test-upload.sh`
+- Per ricaricare tutti i documenti dopo aver cancellato gli indici
+- Per inizializzare un nuovo ambiente
+
+**Note**:
+- Avvia l'applicazione automaticamente se non è già in esecuzione
+- Processa solo i file con estensione `.json`
+- Salva i log in `my-app/app.log` se avvia l'applicazione
+
+---
+
+### 4. test-elastic.sh - Test Indicizzazione e Ricerca
+
+**Scopo**: Esegue una serie di test per verificare indicizzazione e ricerca.
+
+**Uso**:
 ```bash
 ./test-elastic.sh
-./test-upload.sh
 ```
+
+**Cosa fa**:
+1. Indicizza il file JSON `ventimila-leghe.pdf_20260120_192148.json`
+2. Mostra tutti gli indici Elasticsearch creati
+3. Esegue una ricerca semplice (GET) per la parola "mare"
+4. Esegue una ricerca avanzata (POST) per "capitano"
+
+**Output esempio**:
+```
+=== Test 1: Indicizzazione del JSON ===
+Documento indicizzato con ID: abc-123
+✓ Indicizzazione completata
+
+=== Test 2: Verifica indici Elasticsearch ===
+health status index        uuid   pri rep docs.count
+yellow open   files_it     xyz123   1   0         45
+yellow open   files_fr     abc456   1   0         12
+
+=== Test 3: Ricerca semplice ===
+[
+  {
+    "documentId": "abc-123",
+    "fileName": "ventimila-leghe.pdf",
+    "content": "...il mare era calmo...",
+    "score": 12.5
+  }
+]
+
+=== Test 4: Ricerca avanzata ===
+[...]
+```
+
+**Quando usarlo**:
+- Per verificare che il sistema funzioni end-to-end
+- Dopo modifiche al codice di indicizzazione o ricerca
+- Per debug di problemi di ricerca
+
+---
+
+### 5. test-search.sh - Ricerca Parametrica
+
+**Scopo**: Esegue ricerche personalizzate con parametri variabili.
+
+**Uso**:
+```bash
+./test-search.sh [query] [lingua] [dimensione]
+```
+
+**Parametri** (tutti opzionali):
+- `query`: termine di ricerca (default: "nautilus")
+- `lingua`: codice lingua (default: "it")
+- `dimensione`: numero risultati (default: 3)
+
+**Esempi**:
+```bash
+# Ricerca di default
+./test-search.sh
+
+# Ricerca personalizzata
+./test-search.sh "capitano nemo" it 5
+
+# Ricerca in inglese
+./test-search.sh "captain" en 10
+
+# Ricerca senza lingua specifica
+./test-search.sh "adventure"
+```
+
+**Output**:
+```
+Ricerca di: 'capitano nemo' (lingua: it, dimensione: 5)
+Endpoint: http://localhost:8080/api/search/quick
+
+[
+  {
+    "documentId": "abc-123",
+    "fileName": "ventimila-leghe.pdf",
+    "content": "Il capitano Nemo era...",
+    "highlights": ["Il <em>capitano</em> <em>Nemo</em>..."]
+  }
+]
+```
+
+**Quando usarlo**:
+- Per testare query specifiche rapidamente
+- Per verificare la qualità dei risultati di ricerca
+- Durante il debugging di problemi di rilevanza
+
+---
+
+### 6. create-index-template.sh - Configurazione Indici
+
+**Scopo**: Crea un template Elasticsearch per standardizzare la configurazione di tutti gli indici `files_*`.
+
+**Uso**:
+```bash
+./create-index-template.sh
+```
+
+**Cosa fa**:
+1. Crea un template con mapping e settings predefiniti
+2. Configura analyzer standard
+3. Definisce i tipi di campo (keyword, text, integer)
+4. Imposta 1 shard e 0 repliche (ottimale per sviluppo)
+
+**Quando usarlo**:
+- Prima configurazione del sistema
+- Quando si vuole modificare la struttura degli indici
+- Per resettare la configurazione degli indici
+
+**Dopo l'esecuzione**:
+```bash
+# Elimina indici esistenti
+curl -X DELETE 'http://localhost:9200/files_*'
+
+# Ricarica documenti per applicare il nuovo template
+./load-documents.sh
+```
+
+**Output**:
+```
+Template creato con successo!
+
+Per applicare il template, elimina gli indici esistenti e ricarica i documenti:
+  curl -X DELETE 'http://localhost:9200/files_*'
+  Poi ricarica i documenti con ./load-documents.sh
+```
+
+---
+
+## 📋 Workflow Tipici con gli Script
+
+### Workflow 1: Setup Iniziale
+```bash
+# 1. Avvia i servizi
+docker-compose up -d
+
+# 2. Crea il template degli indici
+./create-index-template.sh
+
+# 3. Avvia app e testa
+./run-and-test.sh
+
+# 4. Carica tutti i documenti
+./load-documents.sh
+```
+
+### Workflow 2: Aggiungere Nuovo Documento
+```bash
+# 1. Estrai testo dal PDF
+./test-upload.sh "nuovo-documento.pdf"
+
+# 2. Il JSON viene salvato automaticamente in extracted-documents/
+
+# 3. Indicizza il JSON (manualmente)
+curl -X POST "http://localhost:8080/api/index/from-json?jsonFile=nuovo-documento.pdf_*.json"
+
+# Oppure ricarica tutti
+./load-documents.sh
+```
+
+### Workflow 3: Reset Completo
+```bash
+# 1. Elimina tutti gli indici
+curl -X DELETE 'http://localhost:9200/files_*'
+
+# 2. Ricrea template
+./create-index-template.sh
+
+# 3. Riavvia e testa
+./run-and-test.sh
+
+# 4. Ricarica documenti
+./load-documents.sh
+```
+
+### Workflow 4: Testing e Debug
+```bash
+# 1. Avvia applicazione
+./run-and-test.sh
+
+# 2. Prova diverse ricerche
+./test-search.sh "parola1" it 5
+./test-search.sh "parola2" en 10
+
+# 3. Verifica indici
+curl "http://localhost:9200/_cat/indices?v"
+
+# 4. Controlla documenti
+curl "http://localhost:9200/files_it/_search?size=1&pretty"
+```
+
+---
+
+## 💡 Suggerimenti per gli Script
+
+1. **Permessi di esecuzione**: Se uno script non è eseguibile:
+   ```bash
+   chmod +x *.sh
+   ```
+
+2. **Dipendenze**: Installa strumenti mancanti:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install curl jq
+   
+   # macOS
+   brew install curl jq
+   ```
+
+3. **Path assoluti**: Gli script usano path assoluti, quindi devono essere eseguiti dalla directory root del progetto
+
+4. **Background processes**: `run-and-test.sh` e `load-documents.sh` avviano processi in background; usa `pkill -f spring-boot` per terminarli
+
+5. **Timeout**: Se `load-documents.sh` va in timeout, aumenta `MAX_WAIT` nello script:
+   ```bash
+   MAX_WAIT=60  # aumenta da 30 a 60 secondi
+   ```
 
 ## 📡 API Endpoints
 
