@@ -5,7 +5,9 @@ import co.elastic.clients.elasticsearch.core.IndexRequest;
 import co.elastic.clients.elasticsearch.core.IndexResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.bootify.my_app.config.IndexNameResolver;
+import io.bootify.my_app.model.ChapterSection;
 import io.bootify.my_app.model.DocumentChunk;
+import io.bootify.my_app.model.DocumentExtractionResult;
 import io.bootify.my_app.util.ChunkingUtils;
 import io.bootify.my_app.util.ChunkingUtils.ChunkEntry;
 import org.slf4j.Logger;
@@ -42,9 +44,29 @@ public class ElasticsearchIndexService {
         this.elasticsearchClient = elasticsearchClient;
     }
 
+    /**
+     * Indicizza un documento a partire dal risultato di estrazione completo.
+     * Usa i capitoli PDFBox se disponibili, altrimenti fallback regex su testo.
+     */
+    public void indexDocument(String documentId, DocumentExtractionResult result) {
+        List<ChunkEntry> chunks;
+        if (result.getChapters() != null && !result.getChapters().isEmpty()) {
+            chunks = ChunkingUtils.chunkFromSections(result.getChapters());
+            log.info("Using PDFBox outline: {} chapters → {} chunks", result.getChapters().size(), chunks.size());
+        } else {
+            chunks = ChunkingUtils.chunkWithChapters(result.getText());
+            log.info("Using regex chapter detection: {} chunks", chunks.size());
+        }
+        indexChunks(documentId, result.getFileName(), result.getMetadata(), chunks);
+    }
+
+    /** Overload di compatibilità senza chapters (usa regex fallback). */
     public void indexDocument(String documentId, String fileName, String extractedText, java.util.Map<String, String> metadata) {
         List<ChunkEntry> chunks = ChunkingUtils.chunkWithChapters(extractedText);
+        indexChunks(documentId, fileName, metadata, chunks);
+    }
 
+    private void indexChunks(String documentId, String fileName, java.util.Map<String, String> metadata, List<ChunkEntry> chunks) {
         // Estrae la lingua dai metadati Tika se disponibile, altrimenti usa il rilevamento automatico
         String documentLanguage = extractLanguageFromMetadata(metadata);
 

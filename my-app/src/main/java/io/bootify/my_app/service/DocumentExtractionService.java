@@ -1,7 +1,9 @@
 package io.bootify.my_app.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.bootify.my_app.model.ChapterSection;
 import io.bootify.my_app.model.DocumentExtractionResult;
+import io.bootify.my_app.util.PdfOutlineExtractor;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.parser.AutoDetectParser;
 import org.apache.tika.parser.ParseContext;
@@ -12,6 +14,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.File;
 import java.io.InputStream;
 import java.nio.file.Files;
+import java.util.List;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
@@ -65,6 +68,14 @@ public class DocumentExtractionService {
                     metadataMap,
                     fileName
             );
+
+            // Tenta estrazione capitoli tramite outline PDFBox (solo per PDF)
+            if (fileName != null && fileName.toLowerCase().endsWith(".pdf")) {
+                List<ChapterSection> chapters = PdfOutlineExtractor.extract(file.getBytes());
+                if (!chapters.isEmpty()) {
+                    result.setChapters(chapters);
+                }
+            }
 
             // Salva il risultato in un file JSON
             saveToJsonFile(result, fileName);

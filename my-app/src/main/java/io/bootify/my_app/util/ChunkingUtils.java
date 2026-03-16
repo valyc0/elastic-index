@@ -1,5 +1,6 @@
 package io.bootify.my_app.util;
 
+import io.bootify.my_app.model.ChapterSection;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -32,29 +33,30 @@ public class ChunkingUtils {
      */
     public record ChunkEntry(int chunkIndex, String content, String chapterTitle, int chapterIndex) {}
 
-    private record ChapterSection(String title, int index, String text) {}
+
 
     /**
-     * Suddivide il testo in chunk, assegnando a ciascuno il capitolo di appartenenza.
-     * Se il documento non contiene intestazioni di capitolo riconoscibili, tutti i chunk
-     * avranno chapterTitle vuoto e chapterIndex=0.
+     * Suddivide il testo in chunk usando il fallback regex per rilevare i capitoli.
      */
     public static List<ChunkEntry> chunkWithChapters(String text) {
         if (text == null || text.trim().isEmpty()) {
             return List.of();
         }
+        return chunkFromSections(splitByChapters(text));
+    }
 
-        List<ChapterSection> sections = splitByChapters(text);
-
+    /**
+     * Produce chunk da sezioni già estratte (es. da PDFBox outline).
+     * Ogni chunk eredita il chapterTitle e chapterIndex della sezione di appartenenza.
+     */
+    public static List<ChunkEntry> chunkFromSections(List<ChapterSection> sections) {
         List<ChunkEntry> result = new ArrayList<>();
         int globalChunkIndex = 0;
-
         for (ChapterSection section : sections) {
-            for (String chunkContent : chunkText(section.text())) {
-                result.add(new ChunkEntry(globalChunkIndex++, chunkContent, section.title(), section.index()));
+            for (String chunkContent : chunkText(section.getText())) {
+                result.add(new ChunkEntry(globalChunkIndex++, chunkContent, section.getTitle(), section.getChapterIndex()));
             }
         }
-
         return result;
     }
 

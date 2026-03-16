@@ -50,13 +50,8 @@ public class IndexController {
             log.info("Starting indexing with document ID: {}", documentId);
             log.info("Metadata available: {}", result.getMetadata() != null ? result.getMetadata().size() + " fields" : "none");
             
-            // Indicizza su Elasticsearch
-            elasticsearchIndexService.indexDocument(
-                documentId,
-                result.getFileName(),
-                result.getText(),
-                result.getMetadata()
-            );
+            // Indicizza su Elasticsearch (usa capitoli PDFBox se disponibili)
+            elasticsearchIndexService.indexDocument(documentId, result);
 
             log.info("Document indexed successfully with ID: {}", documentId);
             return ResponseEntity.ok("Documento indicizzato con ID: " + documentId);
@@ -76,12 +71,8 @@ public class IndexController {
             log.info("Starting indexing with document ID: {}", documentId);
             log.info("Metadata available: {}", extraction.getMetadata() != null ? extraction.getMetadata().size() + " fields" : "none");
             
-            elasticsearchIndexService.indexDocument(
-                documentId,
-                extraction.getFileName(),
-                extraction.getText(),
-                extraction.getMetadata()
-            );
+            // Indicizza su Elasticsearch (usa capitoli PDFBox se disponibili)
+            elasticsearchIndexService.indexDocument(documentId, extraction);
 
             log.info("Document indexed successfully with ID: {}", documentId);
             return ResponseEntity.ok("Documento indicizzato con ID: " + documentId);
