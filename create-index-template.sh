@@ -49,6 +49,17 @@ curl -X PUT "http://localhost:9200/_index_template/files_template" \
         "page": {
           "type": "integer"
         },
+        "chapterTitle": {
+          "type": "text",
+          "fields": {
+            "keyword": {
+              "type": "keyword"
+            }
+          }
+        },
+        "chapterIndex": {
+          "type": "integer"
+        },
         "metadata": {
           "type": "object",
           "enabled": true,

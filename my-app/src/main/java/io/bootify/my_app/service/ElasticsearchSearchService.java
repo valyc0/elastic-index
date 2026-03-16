@@ -176,6 +176,8 @@ public class ElasticsearchSearchService {
             result.setLanguage(chunk.getLanguage());
             result.setScore(hit.score() != null ? hit.score().floatValue() : 0.0f);
             result.setMetadata(chunk.getMetadata());
+            result.setChapterTitle(chunk.getChapterTitle());
+            result.setChapterIndex(chunk.getChapterIndex());
             
             // Extract explanation if available
             if (hit.explanation() != null) {
@@ -238,6 +240,8 @@ public class ElasticsearchSearchService {
             result.setContent(source.path("content").asText());
             result.setLanguage(source.path("language").asText());
             result.setScore(hit.path("_score").floatValue());
+            result.setChapterTitle(source.path("chapterTitle").asText(null));
+            result.setChapterIndex(source.path("chapterIndex").isNull() ? null : source.path("chapterIndex").asInt());
             
             // Extract metadata
             Map<String, String> metadata = new HashMap<>();

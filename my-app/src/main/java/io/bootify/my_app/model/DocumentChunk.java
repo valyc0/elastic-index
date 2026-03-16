@@ -26,6 +26,12 @@ public class DocumentChunk {
     @JsonProperty("page")
     private Integer page;
 
+    @JsonProperty("chapterTitle")
+    private String chapterTitle;
+
+    @JsonProperty("chapterIndex")
+    private Integer chapterIndex;
+
     @JsonProperty("metadata")
     private Map<String, String> metadata;
 
@@ -95,6 +101,22 @@ public class DocumentChunk {
 
     public void setPage(Integer page) {
         this.page = page;
+    }
+
+    public String getChapterTitle() {
+        return chapterTitle;
+    }
+
+    public void setChapterTitle(String chapterTitle) {
+        this.chapterTitle = chapterTitle;
+    }
+
+    public Integer getChapterIndex() {
+        return chapterIndex;
+    }
+
+    public void setChapterIndex(Integer chapterIndex) {
+        this.chapterIndex = chapterIndex;
     }
 
     public Map<String, String> getMetadata() {

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.bootify.my_app.config.IndexNameResolver;
 import io.bootify.my_app.model.DocumentChunk;
 import io.bootify.my_app.util.ChunkingUtils;
+import io.bootify.my_app.util.ChunkingUtils.ChunkEntry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
@@ -42,28 +43,30 @@ public class ElasticsearchIndexService {
     }
 
     public void indexDocument(String documentId, String fileName, String extractedText, java.util.Map<String, String> metadata) {
-        List<String> chunks = ChunkingUtils.chunk(extractedText);
-        
+        List<ChunkEntry> chunks = ChunkingUtils.chunkWithChapters(extractedText);
+
         // Estrae la lingua dai metadati Tika se disponibile, altrimenti usa il rilevamento automatico
         String documentLanguage = extractLanguageFromMetadata(metadata);
 
-        for (int i = 0; i < chunks.size(); i++) {
-            String chunkText = chunks.get(i);
-            
+        for (ChunkEntry entry : chunks) {
+            String chunkText = entry.content();
+
             // Usa la lingua dai metadati se disponibile, altrimenti rileva per chunk
             String language = documentLanguage != null ? documentLanguage : languageDetectionService.detect(chunkText);
 
             DocumentChunk chunk = new DocumentChunk();
             chunk.setId(UUID.randomUUID().toString());
             chunk.setDocumentId(documentId);
-            chunk.setChunkIndex(i);
+            chunk.setChunkIndex(entry.chunkIndex());
             chunk.setContent(chunkText);
             chunk.setLanguage(language);
             chunk.setFileName(fileName);
+            chunk.setChapterTitle(entry.chapterTitle());
+            chunk.setChapterIndex(entry.chapterIndex());
             chunk.setMetadata(metadata);
 
             String indexName = indexNameResolver.resolve(chunk);
-            
+
             try {
                 indexChunkViaClient(indexName, chunk);
             } catch (Exception e) {

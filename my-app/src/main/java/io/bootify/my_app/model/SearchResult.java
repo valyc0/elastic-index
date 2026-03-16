@@ -14,6 +14,8 @@ public class SearchResult {
     private String language;
     private Map<String, String> metadata;
     private String explanation;
+    private String chapterTitle;
+    private Integer chapterIndex;
 
     public SearchResult() {
     }
@@ -88,5 +90,21 @@ public class SearchResult {
 
     public void setExplanation(String explanation) {
         this.explanation = explanation;
+    }
+
+    public String getChapterTitle() {
+        return chapterTitle;
+    }
+
+    public void setChapterTitle(String chapterTitle) {
+        this.chapterTitle = chapterTitle;
+    }
+
+    public Integer getChapterIndex() {
+        return chapterIndex;
+    }
+
+    public void setChapterIndex(Integer chapterIndex) {
+        this.chapterIndex = chapterIndex;
     }
 }
