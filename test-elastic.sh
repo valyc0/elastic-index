@@ -1,7 +1,15 @@
 #!/bin/bash
 
 echo "=== Test 1: Indicizzazione del JSON ==="
-RESPONSE=$(curl -s -X POST "http://localhost:8080/api/index/from-json?jsonFile=ventimila-leghe.pdf_20260120_192148.json")
+# Cerca il primo JSON disponibile nella directory extracted-documents
+JSON_FILE=$(ls my-app/extracted-documents/*.json 2>/dev/null | head -1 | xargs basename 2>/dev/null)
+if [[ -z "$JSON_FILE" ]]; then
+    echo "✗ Nessun file JSON trovato in my-app/extracted-documents/"
+    echo "  Prima esegui: ./test-upload.sh <file.pdf>"
+    exit 1
+fi
+echo "Utilizzo file JSON: $JSON_FILE"
+RESPONSE=$(curl -s -X POST "http://localhost:8080/api/index/from-json?jsonFile=$JSON_FILE")
 echo "$RESPONSE"
 echo ""
 

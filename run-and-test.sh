@@ -7,7 +7,8 @@ pkill -9 -f "spring-boot:run" 2>/dev/null
 sleep 2
 
 # Start application
-cd /home/valerio/lavoro/elastic-index/my-app
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/my-app"
 mvn spring-boot:run > /tmp/spring-app.log 2>&1 &
 APP_PID=$!
 
@@ -27,7 +28,7 @@ if curl -s http://localhost:8080/ > /dev/null 2>&1; then
     echo ""
     
     # Run tests
-    cd /home/valerio/lavoro/elastic-index
+    cd "$SCRIPT_DIR"
     ./test-elastic.sh
 else
     echo "✗ Applicazione non risponde"

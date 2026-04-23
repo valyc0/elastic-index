@@ -1,6 +1,6 @@
 # Elastic Index - Sistema di Indicizzazione Full-Text con Elasticsearch
 
-Sistema di indicizzazione e ricerca full-text multilingua per documenti PDF utilizzando Spring Boot, Elasticsearch e Apache Tika.
+Sistema di indicizzazione e ricerca full-text multilingua per documenti PDF utilizzando Spring Boot, Elasticsearch e Apache Tika. Include anche un motore di **ricerca semantica** basato sul modello ML ELSER v2 di Elastic.
 
 ## 🎯 Caratteristiche
 
@@ -11,6 +11,7 @@ Sistema di indicizzazione e ricerca full-text multilingua per documenti PDF util
 - ✅ **Ricerca Google-like** con fuzzy matching e highlighting
 - ✅ **API REST** complete per estrazione, indicizzazione e ricerca
 - ✅ **Supporto documenti multilingua** (anche misti)
+- ✅ **Ricerca semantica** con ELSER v2 (sparse embedding ML nativo Elastic)
 
 ## 🏗️ Architettura
 
@@ -21,6 +22,7 @@ Sistema di indicizzazione e ricerca full-text multilingua per documenti PDF util
 - **Elasticsearch**: 8.11.3
 - **Kibana**: 8.11.3
 - **Apache Tika**: 2.9.1
+- **ELSER v2**: modello ML sparse embedding per ricerca semantica
 
 ### Logica di Chunking
 
@@ -50,6 +52,7 @@ Il sistema crea indici separati per lingua:
 - `files_en` → documenti in inglese
 - `files_fr` → documenti in francese
 - `files_generic` → documenti con lingua non rilevata
+- `semantic_docs` → embedding ELSER per ricerca semantica (vedi sezione dedicata)
 
 Ogni chunk viene indicizzato con:
 - `id` - UUID univoco del chunk
@@ -90,6 +93,203 @@ curl http://localhost:8080/actuator/health
 # Elasticsearch health
 curl http://localhost:9200/_cluster/health
 ```
+
+---
+
+## 🤖 Ricerca Semantica con ELSER v2
+
+### Cos'è ELSER
+
+ELSER (Elastic Learned Sparse EncodeR) è un modello ML proprietario di Elastic che genera **sparse embeddings**: vettori sparsi di token pesati, addestrati su grandi corpora di testo. A differenza della ricerca full-text classica (che cerca corrispondenze esatte di parole), ELSER capisce il **significato semantico** della query.
+
+**Esempi di capacità semantica:**
+- Query `"motore del Nautilus"` → trova chunk che parlano di "propulsione elettrica" anche senza la parola "motore"
+- Query `"polo sud ghiacci"` → trova chunk del capitolo "La banchisa" anche senza le parole esatte
+- Query `"cibo a bordo"` → trova chunk che descrivono i pasti anche con vocabolario diverso
+
+### Prerequisiti
+
+- Licenza Elasticsearch **trial** o **Platinum/Enterprise** (ELSER richiede xpack.ml)
+- La trial gratuita da 30 giorni si attiva automaticamente con `setup-semantic-elastic.sh`
+
+### Setup: script `setup-semantic-elastic.sh`
+
+Lo script configura l'intero stack semantico in un unico passaggio:
+
+```bash
+./setup-semantic-elastic.sh
+```
+
+**Cosa fa, step by step:**
+
+1. **Attiva la trial license** (se non già attiva) via `POST /_license/start_trial`
+2. **Verifica/scarica il modello** `.elser_model_2` dal registry Elastic ML (~438 MB, richiede connessione internet dal container)
+3. **Deploya il modello** con `POST /_ml/trained_models/.elser_model_2/deployment/_start`
+4. **Attende `fully_allocated`** polling su `/_ml/trained_models/.elser_model_2/_stats`
+5. **Crea la ingest pipeline** `elser-v2-sparse`:
+   - Processor `inference`: per ogni documento in ingestion, genera automaticamente il vettore sparso dal campo `content` e lo scrive in `content_embedding`
+6. **Crea l'indice** `semantic_docs` con:
+   - `default_pipeline: elser-v2-sparse` (ogni documento indicizzato passa automaticamente per ELSER)
+   - Mapping `content_embedding` di tipo `sparse_vector`
+
+**Output atteso:**
+```
+[INFO] Modello pronto (state=fully_allocated).
+[INFO] Creazione ingest pipeline 'elser-v2-sparse'...  → HTTP 200
+[INFO] Creazione indice 'semantic_docs'...  → HTTP 200
+[INFO] Setup completato.
+```
+
+### Flusso di indicizzazione semantica
+
+```
+PDF → (Apache Tika) → testo grezzo
+         ↓
+    ChunkingUtils → chunk di testo (~500 parole)
+         ↓
+    POST /api/semantic/index/from-json
+         ↓
+    ElasticsearchClient.index() con pipeline="elser-v2-sparse"
+         ↓
+    Elasticsearch ingest pipeline
+         ↓
+    ELSER v2 genera content_embedding (sparse vector)
+         ↓
+    documento salvato in "semantic_docs" con embedding
+```
+
+### Flusso di ricerca semantica
+
+```
+POST /api/semantic/search {"query": "testo libero", "size": N}
+         ↓
+    SemanticSearchService.search()
+         ↓
+    Elasticsearch text_expansion query su "content_embedding"
+    con model_id=".elser_model_2"
+         ↓
+    ELSER espande la query in token sparsi
+         ↓
+    confronto vettoriale con gli embedding indicizzati
+         ↓
+    risultati ordinati per score di similarità semantica
+```
+
+### API Endpoint semantici
+
+#### Indicizzazione da JSON estratto
+
+```bash
+POST /api/semantic/index/from-json?jsonFile=<nome-file.json>
+```
+
+```bash
+curl -X POST "http://localhost:8080/api/semantic/index/from-json?jsonFile=ventimila-leghe.pdf_20260316_205851.json"
+```
+
+**Response:**
+```json
+{
+  "documentId": "4fefb820-30e3-40da-a5f4-c442297b409b",
+  "fileName": "ventimila-leghe.pdf",
+  "chunks": 179,
+  "index": "semantic_docs",
+  "message": "Documento indicizzato con embedding ELSER"
+}
+```
+
+> **Nota**: ogni chunk impiega ~2 secondi (ELSER gira localmente nel container ES). Per 179 chunk → ~6 minuti totali.
+
+#### Indicizzazione da upload PDF
+
+```bash
+POST /api/semantic/index  (multipart/form-data)
+```
+
+```bash
+curl -X POST "http://localhost:8080/api/semantic/index" \
+  -F "file=@documento.pdf"
+```
+
+#### Ricerca semantica
+
+```bash
+POST /api/semantic/search
+```
+
+```bash
+curl -X POST "http://localhost:8080/api/semantic/search" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "profondità massima raggiunta dal Nautilus", "size": 3}'
+```
+
+**Response:**
+```json
+[
+  {
+    "documentId": "4fefb820-...",
+    "fileName": "ventimila-leghe.pdf",
+    "chapterTitle": "5. Il Mediterraneo in quarantotto ore.",
+    "chunkIndex": 28,
+    "content": "...il Nautilus, scivolando con i suoi alettoni inclinati, si immergeva fino agli strati più profondi del mare. Là, in mancanza di meraviglie...",
+    "score": 23.55
+  }
+]
+```
+
+### Differenza tra ricerca full-text e semantica
+
+| Aspetto | Full-text (`files_it`) | Semantica (`semantic_docs`) |
+|---|---|---|
+| Tecnologia | BM25, fuzzy match | ELSER sparse embedding |
+| Match | Parole esatte/simili | Significato concettuale |
+| Query `"capitano Nemo"` | Trova solo chunk con "capitano" o "Nemo" | Trova anche scene dove agisce il comandante |
+| Query `"polpi attaccano il Nautilus"` | Trova "polpi" e "Nautilus" | Trova l'episodio anche detto come "mostri tentacolari" |
+| Latenza indicizzazione | ~immediata | ~2s/chunk (ELSER inference) |
+| Latenza ricerca | <100ms | ~200-500ms |
+| Licenza ES | Basic (gratuita) | Platinum/Trial |
+
+### Comandi utili per il monitoraggio
+
+```bash
+# Stato deployment ELSER
+curl -s "http://localhost:9200/_ml/trained_models/.elser_model_2/_stats" | \
+  python3 -m json.tool | grep -E '"state"|"allocation_count"'
+
+# Conta chunk indicizzati
+curl -s "http://localhost:9200/semantic_docs/_count"
+
+# Verifica pipeline
+curl -s "http://localhost:9200/_ingest/pipeline/elser-v2-sparse"
+
+# Verifica mapping sparse_vector
+curl -s "http://localhost:9200/semantic_docs/_mapping" | \
+  python3 -m json.tool | grep -A2 "content_embedding"
+```
+
+### Workflow semantico completo
+
+```bash
+# 1. Setup iniziale (una volta sola)
+./setup-semantic-elastic.sh
+
+# 2. Avvia l'applicazione
+cd my-app && mvn spring-boot:run &
+
+# 3. Indicizza un documento già estratto
+curl -X POST "http://localhost:8080/api/semantic/index/from-json?jsonFile=documento.json"
+
+# 4. Attendi il completamento (controlla il count)
+watch -n 5 'curl -s http://localhost:9200/semantic_docs/_count'
+
+# 5. Ricerca semantica
+curl -s -X POST "http://localhost:8080/api/semantic/search" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "la tua domanda in linguaggio naturale", "size": 5}' | \
+  python3 -m json.tool
+```
+
+---
 
 ## 🔧 Script Shell - Guida Completa
 
@@ -625,20 +825,35 @@ http://localhost:5601
 
 ```
 elastic-index/
-├── docker-compose.yml          # Elasticsearch + Kibana
-├── my-app/                     # Applicazione Spring Boot
+├── docker-compose.yml              # Elasticsearch + Kibana
+├── setup-semantic-elastic.sh       # Setup ELSER v2 + pipeline + indice semantico
+├── my-app/                         # Applicazione Spring Boot
 │   ├── src/main/java/
 │   │   └── io/bootify/my_app/
-│   │       ├── rest/           # Controller REST
-│   │       ├── service/        # Business logic
-│   │       ├── model/          # Domain models
-│   │       ├── config/         # Configuration
-│   │       └── util/           # Utilities (chunking)
-│   ├── extracted-documents/    # JSON estratti da PDF
+│   │       ├── rest/
+│   │       │   ├── IndexController.java          # /api/index/* (full-text)
+│   │       │   ├── SearchController.java         # /api/search/* (full-text)
+│   │       │   ├── SemanticController.java       # /api/semantic/* (ELSER)
+│   │       │   └── DocumentExtractionController.java
+│   │       ├── service/
+│   │       │   ├── ElasticsearchIndexService.java   # indicizzazione full-text
+│   │       │   ├── ElasticsearchSearchService.java  # ricerca full-text
+│   │       │   ├── SemanticIndexService.java        # indicizzazione ELSER
+│   │       │   ├── SemanticSearchService.java       # ricerca semantica ELSER
+│   │       │   ├── DocumentExtractionService.java
+│   │       │   └── LanguageDetectionService.java
+│   │       ├── model/
+│   │       │   ├── SemanticChunk.java     # chunk con @JsonIgnoreProperties
+│   │       │   └── ...
+│   │       ├── config/
+│   │       └── util/
+│   │           └── ChunkingUtils.java     # splitting testo in chunk
+│   ├── extracted-documents/        # JSON estratti da PDF
 │   └── pom.xml
-├── run-and-test.sh            # Script avvio e test completo
-├── test-elastic.sh            # Test ricerca
-└── test-upload.sh             # Test upload
+├── run-and-test.sh                 # Script avvio e test completo
+├── test-elastic.sh                 # Test ricerca full-text
+├── test-upload.sh                  # Test upload PDF
+└── create-index-template.sh        # Configurazione template indici
 ```
 
 ## 🧪 Testing
@@ -701,12 +916,52 @@ Aumenta memoria in `docker-compose.yml`:
 ES_JAVA_OPTS=-Xms1g -Xmx1g
 ```
 
+### ELSER non si deploya
+
+```bash
+# Controlla stato modello
+curl -s "http://localhost:9200/_ml/trained_models/.elser_model_2/_stats" | \
+  python3 -m json.tool | grep -E '"state"|"error"'
+
+# Riprova setup completo
+./setup-semantic-elastic.sh
+```
+
+### Ricerca semantica restituisce 500
+
+Causa più comune: `content_embedding` (sparse_vector) non è escluso dalla `_source` quando ES restituisce i risultati, causando un errore di deserializzazione Jackson.
+
+**Soluzione già applicata** in `SemanticSearchService.java`:
+```java
+.source(src -> src.filter(f -> f.excludes("content_embedding")))
+```
+
+E in `SemanticChunk.java`:
+```java
+@JsonIgnoreProperties(ignoreUnknown = true)
+```
+
+### Pipeline `elser-v2-sparse` non trovata (risposta `{}`)
+
+Esegui di nuovo lo script di setup:
+```bash
+./setup-semantic-elastic.sh
+```
+
+### Indice `semantic_docs` non esiste
+
+```bash
+curl -s "http://localhost:9200/semantic_docs/_count"
+# se 404 → rieseguire setup-semantic-elastic.sh
+```
+
 ### Documenti non trovati
 
 Verifica indicizzazione:
 
 ```bash
 curl "http://localhost:9200/files_*/_count"
+curl "http://localhost:9200/semantic_docs/_count"
 ```
 
 ## 📝 Licenza
@@ -719,4 +974,6 @@ Progetto sviluppato per indicizzazione e ricerca documentale enterprise.
 
 ---
 
-**Status**: ✅ Completato e funzionante (Gennaio 2026)
+**Status**: ✅ Completato e funzionante (Aprile 2026)
+- Ricerca full-text: indici `files_*` con BM25
+- Ricerca semantica: indice `semantic_docs` con ELSER v2 sparse embedding
