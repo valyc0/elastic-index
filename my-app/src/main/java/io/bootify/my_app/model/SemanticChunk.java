@@ -3,9 +3,12 @@ package io.bootify.my_app.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
+import java.util.List;
+
 /**
- * Chunk di documento destinato all'indice semantico con embedding ELSER.
- * Il campo content_embedding viene popolato automaticamente dall'ingest pipeline di Elasticsearch.
+ * Chunk di documento destinato all'indice semantico con dense vector embedding.
+ * Il campo content_embedding viene popolato dall'app Java tramite Ollama
+ * prima dell'indicizzazione (nessuna ingest pipeline richiesta).
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class SemanticChunk {
@@ -27,6 +30,9 @@ public class SemanticChunk {
 
     @JsonProperty("chapterIndex")
     private Integer chapterIndex;
+
+    @JsonProperty("content_embedding")
+    private List<Float> contentEmbedding;
 
     public SemanticChunk() {
     }
@@ -77,5 +83,13 @@ public class SemanticChunk {
 
     public void setChapterIndex(Integer chapterIndex) {
         this.chapterIndex = chapterIndex;
+    }
+
+    public List<Float> getContentEmbedding() {
+        return contentEmbedding;
+    }
+
+    public void setContentEmbedding(List<Float> contentEmbedding) {
+        this.contentEmbedding = contentEmbedding;
     }
 }

@@ -40,13 +40,14 @@ spring-boot-devtools.properties
 
 # Logs
 *.log
+*.log.*.gz
 logs/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Extracted documents
+# Extracted documents (file pesanti generati a runtime)
 my-app/extracted-documents/*.json
 my-app/extracted-documents/*.pdf
 

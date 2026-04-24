@@ -14,9 +14,9 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Indicizza i chunk di un documento nell'indice semantico, passando attraverso
- * l'ingest pipeline di Elasticsearch che genera automaticamente l'embedding
- * sparso ELSER sul campo "content".
+ * Indicizza i chunk di un documento nell'indice semantico.
+ * L'embedding denso viene generato da Ollama (nomic-embed-text) prima
+ * dell'indicizzazione – nessuna ingest pipeline né licenza trial richiesta.
  */
 @Service
 public class SemanticIndexService {
@@ -24,16 +24,19 @@ public class SemanticIndexService {
     private static final Logger log = LoggerFactory.getLogger(SemanticIndexService.class);
 
     public static final String SEMANTIC_INDEX = "semantic_docs";
-    public static final String SEMANTIC_PIPELINE = "elser-v2-sparse";
 
     private final ElasticsearchClient elasticsearchClient;
+    private final OllamaEmbeddingService ollamaEmbeddingService;
 
-    public SemanticIndexService(ElasticsearchClient elasticsearchClient) {
+    public SemanticIndexService(ElasticsearchClient elasticsearchClient,
+                                OllamaEmbeddingService ollamaEmbeddingService) {
         this.elasticsearchClient = elasticsearchClient;
+        this.ollamaEmbeddingService = ollamaEmbeddingService;
     }
 
     /**
-     * Suddivide il documento in chunk e li indicizza nel vettore semantico.
+     * Suddivide il documento in chunk, genera gli embedding tramite Ollama
+     * e li indicizza in Elasticsearch.
      *
      * @return numero di chunk indicizzati
      */
@@ -58,12 +61,15 @@ public class SemanticIndexService {
             chunk.setChapterTitle(entry.chapterTitle());
             chunk.setChapterIndex(entry.chapterIndex());
 
+            // Genera embedding denso tramite Ollama (free, locale)
+            List<Float> embedding = ollamaEmbeddingService.embed(entry.content());
+            chunk.setContentEmbedding(embedding);
+
             String chunkId = UUID.randomUUID().toString();
             try {
                 IndexRequest<SemanticChunk> request = IndexRequest.of(b -> b
                         .index(SEMANTIC_INDEX)
                         .id(chunkId)
-                        .pipeline(SEMANTIC_PIPELINE)
                         .document(chunk)
                 );
                 elasticsearchClient.index(request);

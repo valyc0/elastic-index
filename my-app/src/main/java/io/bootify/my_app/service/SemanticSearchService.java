@@ -14,37 +14,40 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Esegue ricerche semantiche per similitudine sull'indice semantic_docs
- * usando la query text_expansion di Elasticsearch con il modello ELSER.
- * ELSER genera internamente i token sparsi sia al momento dell'indicizzazione
- * (via ingest pipeline) sia al momento della query.
+ * Esegue ricerche semantiche kNN sull'indice semantic_docs usando dense vector.
+ * La query viene embeddara tramite Ollama (nomic-embed-text) e confrontata con
+ * i vettori salvati tramite cosine similarity – 100% free, nessuna licenza.
  */
 @Service
 public class SemanticSearchService {
 
     private static final Logger log = LoggerFactory.getLogger(SemanticSearchService.class);
 
-    private static final String ELSER_MODEL_ID = ".elser_model_2";
     private static final String EMBEDDING_FIELD = "content_embedding";
 
     private final ElasticsearchClient elasticsearchClient;
+    private final OllamaEmbeddingService ollamaEmbeddingService;
 
-    public SemanticSearchService(ElasticsearchClient elasticsearchClient) {
+    public SemanticSearchService(ElasticsearchClient elasticsearchClient,
+                                 OllamaEmbeddingService ollamaEmbeddingService) {
         this.elasticsearchClient = elasticsearchClient;
+        this.ollamaEmbeddingService = ollamaEmbeddingService;
     }
 
     /**
-     * Ricerca semantica: la query testuale viene espansa da ELSER in token sparsi
-     * e confrontata con gli embedding memorizzati nel campo content_embedding.
+     * Ricerca semantica kNN: la query viene embeddara da Ollama e confrontata
+     * con i vettori densi nell'indice tramite cosine similarity.
      *
      * @param queryText testo della query in linguaggio naturale
      * @param size      numero massimo di risultati
      * @return lista di risultati ordinati per score di similitudine (desc)
      */
     public List<SearchResult> search(String queryText, int size) {
-        log.info("Semantic search: query='{}', size={}", queryText, size);
+        log.info("Semantic kNN search: query='{}', size={}", queryText, size);
 
         try {
+            List<Float> queryVector = ollamaEmbeddingService.embed(queryText);
+
             SearchRequest request = SearchRequest.of(s -> s
                     .index(SemanticIndexService.SEMANTIC_INDEX)
                     .size(size)
@@ -53,12 +56,11 @@ public class SemanticSearchService {
                                     .excludes(EMBEDDING_FIELD)
                             )
                     )
-                    .query(q -> q
-                            .textExpansion(te -> te
-                                    .field(EMBEDDING_FIELD)
-                                    .modelId(ELSER_MODEL_ID)
-                                    .modelText(queryText)
-                            )
+                    .knn(k -> k
+                            .field(EMBEDDING_FIELD)
+                            .queryVector(queryVector)
+                            .numCandidates(100)
+                            .k(size)
                     )
             );
 
@@ -82,11 +84,11 @@ public class SemanticSearchService {
                 results.add(result);
             }
 
-            log.info("Semantic search completed: {} results for query='{}'", results.size(), queryText);
+            log.info("Semantic kNN search completed: {} results for query='{}'", results.size(), queryText);
             return results;
 
         } catch (Exception e) {
-            log.error("Error during semantic search for query='{}'", queryText, e);
+            log.error("Error during semantic kNN search for query='{}'", queryText, e);
             throw new RuntimeException("Semantic search failed: " + e.getMessage(), e);
         }
     }

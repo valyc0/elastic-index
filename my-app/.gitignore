@@ -5,7 +5,11 @@ target/
 !**/src/test/**/target/
 application-local.yml
 *.log
+*.log.*.gz
 .DS_Store
+
+# Documenti estratti (generati a runtime)
+extracted-documents/*.json
 
 ## IntelliJ IDEA
 .idea
