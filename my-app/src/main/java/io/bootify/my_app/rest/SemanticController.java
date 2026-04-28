@@ -91,7 +91,7 @@ public class SemanticController {
                     "documentId", documentId,
                     "fileName", extracted.getFileName(),
                     "chunks", chunks,
-                    "index", SemanticIndexService.SEMANTIC_INDEX,
+                    "index", "semantic_docs",
                     "message", "Documento indicizzato con embedding ELSER"
             ));
 
@@ -156,7 +156,7 @@ public class SemanticController {
                     "documentId", documentId,
                     "fileName", result.getFileName(),
                     "chunks", chunks,
-                    "index", SemanticIndexService.SEMANTIC_INDEX,
+                    "index", "semantic_docs",
                     "message", "Documento indicizzato con embedding ELSER"
             ));
         } catch (Exception e) {

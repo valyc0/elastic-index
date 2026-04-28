@@ -6,60 +6,63 @@ import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
 import io.bootify.my_app.model.SearchResult;
 import io.bootify.my_app.model.SemanticChunk;
+import io.bootify.my_app.service.embedding.EmbeddingProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Esegue ricerche semantiche kNN sull'indice semantic_docs usando dense vector.
- * La query viene embeddara tramite Ollama (nomic-embed-text) e confrontata con
- * i vettori salvati tramite cosine similarity – 100% free, nessuna licenza.
+ * Esegue ricerche semantiche kNN sull'indice semantico usando dense vector.
+ *
+ * <p>Delega la generazione del query embedding a {@link EmbeddingProvider},
+ * rendendo il servizio indipendente dal modello di embedding specifico.
+ *
+ * <p>Per la ricerca ibrida (BM25 + kNN con RRF), usare {@link HybridSearchService}.
  */
 @Service
 public class SemanticSearchService {
 
     private static final Logger log = LoggerFactory.getLogger(SemanticSearchService.class);
-
     private static final String EMBEDDING_FIELD = "content_embedding";
 
     private final ElasticsearchClient elasticsearchClient;
-    private final OllamaEmbeddingService ollamaEmbeddingService;
+    private final EmbeddingProvider embeddingProvider;
+
+    @Value("${semantic.index.name:semantic_docs}")
+    private String semanticIndex;
 
     public SemanticSearchService(ElasticsearchClient elasticsearchClient,
-                                 OllamaEmbeddingService ollamaEmbeddingService) {
+                                 EmbeddingProvider embeddingProvider) {
         this.elasticsearchClient = elasticsearchClient;
-        this.ollamaEmbeddingService = ollamaEmbeddingService;
+        this.embeddingProvider = embeddingProvider;
     }
 
     /**
-     * Ricerca semantica kNN: la query viene embeddara da Ollama e confrontata
-     * con i vettori densi nell'indice tramite cosine similarity.
+     * Ricerca semantica kNN pura.
      *
      * @param queryText testo della query in linguaggio naturale
      * @param size      numero massimo di risultati
-     * @return lista di risultati ordinati per score di similitudine (desc)
+     * @return lista di risultati ordinati per cosine similarity (desc)
      */
     public List<SearchResult> search(String queryText, int size) {
-        log.info("Semantic kNN search: query='{}', size={}", queryText, size);
+        log.info("Semantic kNN search: query='{}', size={}, model={}",
+                queryText, size, embeddingProvider.modelName());
 
         try {
-            List<Float> queryVector = ollamaEmbeddingService.embed(queryText);
+            List<Float> queryVector = embeddingProvider.embed(queryText);
 
             SearchRequest request = SearchRequest.of(s -> s
-                    .index(SemanticIndexService.SEMANTIC_INDEX)
+                    .index(semanticIndex)
                     .size(size)
-                    .source(src -> src
-                            .filter(f -> f
-                                    .excludes(EMBEDDING_FIELD)
-                            )
-                    )
+                    .source(src -> src.filter(f -> f.excludes(EMBEDDING_FIELD)))
                     .knn(k -> k
                             .field(EMBEDDING_FIELD)
                             .queryVector(queryVector)
-                            .numCandidates(100)
+                            .numCandidates(Math.min(size * 5, 500))
                             .k(size)
                     )
             );
@@ -69,9 +72,7 @@ public class SemanticSearchService {
 
             List<SearchResult> results = new ArrayList<>();
             for (Hit<SemanticChunk> hit : response.hits().hits()) {
-                if (hit.source() == null) {
-                    continue;
-                }
+                if (hit.source() == null) continue;
                 SemanticChunk chunk = hit.source();
                 SearchResult result = new SearchResult();
                 result.setDocumentId(chunk.getDocumentId());
@@ -84,12 +85,12 @@ public class SemanticSearchService {
                 results.add(result);
             }
 
-            log.info("Semantic kNN search completed: {} results for query='{}'", results.size(), queryText);
+            log.info("kNN search completata: {} risultati per query='{}'", results.size(), queryText);
             return results;
 
         } catch (Exception e) {
-            log.error("Error during semantic kNN search for query='{}'", queryText, e);
-            throw new RuntimeException("Semantic search failed: " + e.getMessage(), e);
+            log.error("Errore nella ricerca kNN per query='{}'", queryText, e);
+            throw new RuntimeException("Ricerca semantica fallita: " + e.getMessage(), e);
         }
     }
 }
