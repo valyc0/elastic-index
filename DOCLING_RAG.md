@@ -613,39 +613,80 @@ curl -X POST http://localhost:8080/api/docling/index \
 }
 ```
 
-### Fai una domanda RAG
+### Domanda RAG su tutti i documenti
 
 ```bash
-curl -X POST http://localhost:8080/api/docling/ask \
+curl -s -X POST http://localhost:8080/api/rag/ask \
   -H "Content-Type: application/json" \
-  -d '{
-    "query": "Chi sono i protagonisti principali?",
-    "topK": 5,
-    "language": "it"
-  }'
+  -d '{"query": "Chi sono i protagonisti?", "topK": 5}' \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['answer'])"
 ```
 
-### Ricerca ibrida senza LLM (debug retrieval)
+### Domanda RAG con risposta completa (answer + fonti)
 
 ```bash
-curl -X POST http://localhost:8080/api/rag/search \
+curl -s -X POST http://localhost:8080/api/rag/ask \
   -H "Content-Type: application/json" \
-  -d '{
-    "query": "risultati della tabella",
-    "topK": 10
-  }'
+  -d '{"query": "Di cosa parla il documento?", "topK": 5}' \
+  | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print('RISPOSTA:', d['answer'])
+print()
+print(f\"LLM: {d['llmModel']} | {d['processingTimeMs']}ms\")
+print()
+for s in d['sources']:
+    print(f\"  • {s['fileName']} — {s['chapterTitle'][:50]} (score={s['relevanceScore']:.6f})\")
+"
 ```
 
-### Filtra per documento specifico
+### Ricerca ibrida senza LLM (più veloce, per debug retrieval)
 
 ```bash
-curl -X POST http://localhost:8080/api/docling/ask \
+curl -s -X POST http://localhost:8080/api/rag/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "capitano Nemo", "topK": 3}' \
+  | python3 -c "
+import sys, json
+for r in json.load(sys.stdin):
+    print(r['fileName'], '—', (r['chapterTitle'] or '(no title)')[:50])
+"
+```
+
+### Domanda filtrata per documento specifico
+
+Prima recupera i `documentId` disponibili:
+
+```bash
+curl -s "http://localhost:9200/semantic_docs/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"size":0,"aggs":{"docs":{"terms":{"field":"documentId","size":20}}}}' \
+  | python3 -c "
+import sys, json
+for b in json.load(sys.stdin)['aggregations']['docs']['buckets']:
+    print(b['key'], '-', b['doc_count'], 'chunk')
+"
+```
+
+Poi usa il `documentId` ottenuto:
+
+```bash
+curl -s -X POST http://localhost:8080/api/rag/ask \
   -H "Content-Type: application/json" \
   -d '{
     "query": "Qual è la conclusione?",
     "topK": 5,
     "documentId": "a1b2c3d4-..."
-  }'
+  }' | python3 -c "import sys,json; print(json.load(sys.stdin)['answer'])"
+```
+
+### Tramite endpoint Docling (parse + ask in un controller unico)
+
+```bash
+curl -s -X POST http://localhost:8080/api/docling/ask \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Descrivi il protagonista principale", "topK": 5}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['answer'])"
 ```
 
 ---
