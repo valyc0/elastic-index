@@ -58,3 +58,6 @@ my-app/extracted-documents/*.pdf
 # Temporary files
 *.tmp
 *.temp
+
+# Secrets locali
+my-app/.env
