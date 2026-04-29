@@ -17,20 +17,32 @@ if [ $? -ne 0 ] || [ -z "$RESPONSE" ]; then
   exit 1
 fi
 
-ANSWER=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('answer','(vuoto)'))" 2>/dev/null)
-MODEL=$(echo "$RESPONSE"  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('llmModel','?'))" 2>/dev/null)
-EMBED=$(echo "$RESPONSE"  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('embeddingModel','?'))" 2>/dev/null)
-TIME=$(echo "$RESPONSE"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('processingTimeMs','?'))" 2>/dev/null)
-
-echo "RISPOSTA:"
-echo "$ANSWER"
-echo ""
-echo "LLM: $MODEL | Embedding: $EMBED | Tempo: ${TIME}ms"
-echo ""
-echo "FONTI:"
 echo "$RESPONSE" | python3 -c "
 import sys, json
+
 d = json.load(sys.stdin)
-for s in d.get('sources', []):
-    print(f\"  • {s.get('fileName','?')} — {s.get('chapterTitle','?')} (score={s.get('relevanceScore',0):.4f})\")
+needs_clarification = d.get('needsClarification', False)
+raw_answer          = d.get('answer')
+answer              = raw_answer if raw_answer and str(raw_answer).strip().lower() != 'null' else None
+model               = d.get('llmModel', '?')
+embed               = d.get('embeddingModel', '?')
+ms                  = d.get('processingTimeMs', '?')
+sources             = d.get('sources', [])
+session_id          = d.get('sessionId', '')
+
+if needs_clarification or not answer:
+    print('Non ho trovato informazioni pertinenti nel documento.')
+else:
+    print(answer)
+
+print()
+print(f'LLM: {model} | Embedding: {embed} | Tempo: {ms}ms')
+if session_id:
+    print(f'Session: {session_id}')
+
+if sources:
+    print()
+    print('FONTI:')
+    for s in sources:
+        print(f\"  • {s.get('fileName','?')} — {s.get('chapterTitle','?')} (score={s.get('relevanceScore',0):.4f})\")
 " 2>/dev/null

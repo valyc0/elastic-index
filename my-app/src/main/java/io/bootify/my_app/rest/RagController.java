@@ -3,6 +3,7 @@ package io.bootify.my_app.rest;
 import io.bootify.my_app.model.RagAnswer;
 import io.bootify.my_app.model.RagRequest;
 import io.bootify.my_app.model.SearchResult;
+import io.bootify.my_app.service.ConversationSessionService;
 import io.bootify.my_app.service.HybridSearchService;
 import io.bootify.my_app.service.RagService;
 import jakarta.validation.Valid;
@@ -20,9 +21,11 @@ import java.util.Map;
  *
  * <p>Endpoints:
  * <ul>
- *   <li>{@code POST /api/rag/ask} – domanda RAG completa (retrieval + LLM)</li>
- *   <li>{@code POST /api/rag/search} – hybrid search senza generazione LLM</li>
- *   <li>{@code GET  /api/rag/health} – verifica disponibilità servizi</li>
+ *   <li>{@code POST /api/rag/session}        – crea una nuova sessione (chiamare all'apertura pagina)</li>
+ *   <li>{@code DELETE /api/rag/session/{id}} – elimina esplicitamente una sessione</li>
+ *   <li>{@code POST /api/rag/ask}            – domanda RAG completa (retrieval + LLM)</li>
+ *   <li>{@code POST /api/rag/search}         – hybrid search senza generazione LLM</li>
+ *   <li>{@code GET  /api/rag/health}         – verifica disponibilità servizi</li>
  * </ul>
  */
 @RestController
@@ -33,10 +36,40 @@ public class RagController {
 
     private final RagService ragService;
     private final HybridSearchService hybridSearchService;
+    private final ConversationSessionService sessionService;
 
-    public RagController(RagService ragService, HybridSearchService hybridSearchService) {
+    public RagController(RagService ragService,
+                         HybridSearchService hybridSearchService,
+                         ConversationSessionService sessionService) {
         this.ragService = ragService;
         this.hybridSearchService = hybridSearchService;
+        this.sessionService = sessionService;
+    }
+
+    /**
+     * Crea una nuova sessione conversazionale vuota.
+     * Il client deve chiamare questo endpoint all'apertura della pagina di ricerca
+     * e conservare il {@code sessionId} restituito per le richieste successive.
+     *
+     * <p>Esempio:
+     * <pre>
+     * POST /api/rag/session
+     * → { "sessionId": "550e8400-e29b-41d4-a716-446655440000" }
+     * </pre>
+     */
+    @PostMapping("/session")
+    public ResponseEntity<Map<String, String>> createSession() {
+        String sessionId = sessionService.createSession();
+        return ResponseEntity.ok(Map.of("sessionId", sessionId));
+    }
+
+    /**
+     * Elimina esplicitamente una sessione (es. utente chiude la chat o fa logout).
+     */
+    @DeleteMapping("/session/{sessionId}")
+    public ResponseEntity<Void> deleteSession(@PathVariable String sessionId) {
+        sessionService.deleteSession(sessionId);
+        return ResponseEntity.noContent().build();
     }
 
     /**
@@ -58,8 +91,11 @@ public class RagController {
             return ResponseEntity.badRequest().build();
         }
         try {
-            log.info("RAG ask: query='{}'", request.getQuery());
+            log.info("RAG ask: sessionId='{}' query='{}'",
+                    request.getSessionId(), request.getQuery());
             RagAnswer answer = ragService.ask(request);
+            log.info("RAG risposta generata: needsClarification={}, followUpQuestions={}",
+                    answer.isNeedsClarification(), answer.getFollowUpQuestions().size());
             return ResponseEntity.ok(answer);
         } catch (Exception e) {
             log.error("Errore nella pipeline RAG", e);

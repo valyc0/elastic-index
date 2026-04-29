@@ -4,6 +4,10 @@ import java.util.Map;
 
 /**
  * Request per la pipeline RAG.
+ *
+ * <p>Lo storico conversazionale è gestito interamente server-side tramite {@code sessionId}.
+ * Il client non deve più inviare la history: ottiene un {@code sessionId} chiamando
+ * {@code POST /api/rag/session} all'apertura della pagina e lo include in ogni richiesta.
  */
 public class RagRequest {
 
@@ -28,6 +32,13 @@ public class RagRequest {
      */
     private String documentId;
 
+    /**
+     * ID della sessione conversazionale, ottenuto da {@code POST /api/rag/session}.
+     * Lo storico dei turni precedenti è mantenuto server-side e recuperato automaticamente.
+     * Se null o non trovato, la richiesta viene trattata come primo turno senza storia.
+     */
+    private String sessionId;
+
     public RagRequest() {}
 
     public String getQuery() { return query; }
@@ -44,4 +55,8 @@ public class RagRequest {
 
     public String getDocumentId() { return documentId; }
     public void setDocumentId(String documentId) { this.documentId = documentId; }
+
+    public String getSessionId() { return sessionId; }
+    public void setSessionId(String sessionId) { this.sessionId = sessionId; }
 }
+

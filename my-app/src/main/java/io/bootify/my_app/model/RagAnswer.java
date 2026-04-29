@@ -1,10 +1,12 @@
 package io.bootify.my_app.model;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Risposta della pipeline RAG: include la risposta generata dall'LLM
- * e i chunk di contesto usati come fonti (per citazioni e trasparenza).
+ * Risposta della pipeline RAG: include la risposta generata dall'LLM,
+ * i chunk di contesto usati come fonti e le domande di approfondimento
+ * suggerite dall'AI per raffinare la conversazione.
  */
 public class RagAnswer {
 
@@ -25,6 +27,22 @@ public class RagAnswer {
 
     /** Tempo di elaborazione totale in ms. */
     private long processingTimeMs;
+
+    /**
+     * Domande di approfondimento suggerite dall'AI per ottenere risposte più precise.
+     * L'utente può reinviare una nuova request con lo stesso {@code sessionId} e la
+     * domanda scelta come {@code query}.
+     */
+    private List<String> followUpQuestions = new ArrayList<>();
+
+    /**
+     * True se l'AI ha rilevato che la domanda è ambigua o troppo generica
+     * e ha generato domande di chiarimento in {@code followUpQuestions}.
+     */
+    private boolean needsClarification;
+
+    /** ID della sessione conversazionale associata a questa risposta. */
+    private String sessionId;
 
     public RagAnswer() {}
 
@@ -55,6 +73,19 @@ public class RagAnswer {
 
     public long getProcessingTimeMs() { return processingTimeMs; }
     public void setProcessingTimeMs(long processingTimeMs) { this.processingTimeMs = processingTimeMs; }
+
+    public List<String> getFollowUpQuestions() { return followUpQuestions; }
+    public void setFollowUpQuestions(List<String> followUpQuestions) {
+        this.followUpQuestions = followUpQuestions != null ? followUpQuestions : new ArrayList<>();
+    }
+
+    public boolean isNeedsClarification() { return needsClarification; }
+    public void setNeedsClarification(boolean needsClarification) {
+        this.needsClarification = needsClarification;
+    }
+
+    public String getSessionId() { return sessionId; }
+    public void setSessionId(String sessionId) { this.sessionId = sessionId; }
 
     /**
      * Fonte usata nella risposta RAG (singolo chunk con metadati).
