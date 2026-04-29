@@ -39,14 +39,17 @@ public class OllamaLlmProvider implements LlmProvider {
 
     private final String ollamaUrl;
     private final String chatModel;
+    private final int timeoutSeconds;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
     public OllamaLlmProvider(
             @Value("${ollama.url:http://localhost:11434}") String ollamaUrl,
-            @Value("${ollama.chat.model:llama3}") String chatModel) {
+            @Value("${ollama.chat.model:llama3}") String chatModel,
+            @Value("${ollama.chat.timeout-seconds:300}") int timeoutSeconds) {
         this.ollamaUrl = ollamaUrl;
         this.chatModel = chatModel;
+        this.timeoutSeconds = timeoutSeconds;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
                 .build();
@@ -82,7 +85,7 @@ public class OllamaLlmProvider implements LlmProvider {
                     .uri(URI.create(ollamaUrl + "/api/chat"))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                    .timeout(Duration.ofSeconds(120))
+                    .timeout(Duration.ofSeconds(timeoutSeconds))
                     .build();
 
             HttpResponse<String> response = httpClient.send(request,

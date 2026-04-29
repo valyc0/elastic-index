@@ -1,7 +1,8 @@
 #!/bin/bash
 # Esegue solo la query RAG (presuppone Spring Boot già avviato)
+# Uso: ./query-rag.sh "domanda"   oppure   QUERY="domanda" ./query-rag.sh
 
-QUERY="${QUERY:-Chi è il capitano Nemo e cosa guida?}"
+QUERY="${1:-${QUERY:-Chi è il capitano Nemo e cosa guida?}}"
 URL="http://localhost:8080/api/docling/ask"
 
 echo "» query: \"$QUERY\""
