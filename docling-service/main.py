@@ -9,6 +9,7 @@ Endpoints:
   GET  /health        - health check
 """
 
+import asyncio
 import io
 import logging
 import tempfile
@@ -106,7 +107,8 @@ async def parse_document(file: UploadFile = File(...)):
         tmp_path = tmp.name
 
     try:
-        result = converter.convert(tmp_path)
+        # Esegui il parsing in un thread separato per non bloccare l'event loop
+        result = await asyncio.to_thread(converter.convert, tmp_path)
         doc = result.document
 
         # ── Estrai sezioni strutturate con gerarchia capitoli ────────────────
