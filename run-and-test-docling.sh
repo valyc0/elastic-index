@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 DOCLING_URL="${DOCLING_URL:-http://localhost:8001}"
 ES_URL="${ES_URL:-http://localhost:9200}"
-QUERY="${QUERY:-Di cosa parla il libro?}"
+QUERY="${QUERY:-Chi è il capitano Nemo e cosa guida?}"
 TOP_K="${TOP_K:-3}"
 TEST_FILE="${1:-$SCRIPT_DIR/ventimila-leghe.pdf}"
 
