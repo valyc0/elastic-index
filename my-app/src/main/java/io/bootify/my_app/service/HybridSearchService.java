@@ -17,6 +17,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Servizio di ricerca ibrida che combina BM25 (full-text) e kNN (vector similarity).
@@ -34,6 +35,10 @@ import java.util.Map;
  *   <li>kNN gestisce sinonimi, parafrasi e concetti semanticamente simili</li>
  *   <li>RRF combina i punti di forza di entrambi in modo robusto</li>
  * </ul>
+ *
+ * <p>BM25 e kNN vengono eseguiti in parallelo tramite {@link CompletableFuture}
+ * per ridurre la latenza complessiva. Se uno dei due fallisce, l'altro viene
+ * comunque usato (fallback graceful).
  */
 @Service
 public class HybridSearchService {
@@ -75,6 +80,9 @@ public class HybridSearchService {
     /**
      * Ricerca ibrida con filtri opzionali sui metadati.
      *
+     * <p>BM25 e kNN vengono eseguiti in parallelo; se uno fallisce
+     * vengono restituiti solo i risultati dell'altro.
+     *
      * @param queryText      testo della query
      * @param size           numero di risultati
      * @param metadataFilter coppia chiave/valore per filtrare i risultati (es. fileName)
@@ -83,15 +91,20 @@ public class HybridSearchService {
     public List<SearchResult> search(String queryText, int size, Map<String, String> metadataFilter) {
         log.info("Hybrid search: query='{}', size={}, filter={}", queryText, size, metadataFilter);
 
-        // Esegui BM25 e kNN in parallelo (candidati ampi per il merge)
         int candidateSize = Math.min(size * 3, 150);
 
-        List<SearchResult> bm25Results = executeBm25Search(queryText, candidateSize, metadataFilter);
-        List<SearchResult> knnResults = executeKnnSearch(queryText, candidateSize, metadataFilter);
+        // Avvia BM25 e kNN in parallelo (ElasticsearchClient e HttpClient sono thread-safe)
+        CompletableFuture<List<SearchResult>> bm25Future = CompletableFuture
+                .supplyAsync(() -> executeBm25Search(queryText, candidateSize, metadataFilter));
+
+        CompletableFuture<List<SearchResult>> knnFuture = CompletableFuture
+                .supplyAsync(() -> executeKnnSearch(queryText, candidateSize, metadataFilter));
+
+        List<SearchResult> bm25Results = bm25Future.join();
+        List<SearchResult> knnResults  = knnFuture.join();
 
         log.debug("BM25: {} risultati, kNN: {} risultati", bm25Results.size(), knnResults.size());
 
-        // Applica RRF per fondere i risultati
         List<SearchResult> merged = reciprocalRankFusion(bm25Results, knnResults, size);
         log.info("Hybrid RRF: {} risultati finali", merged.size());
         return merged;

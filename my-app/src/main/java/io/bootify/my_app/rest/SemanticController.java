@@ -130,6 +130,31 @@ public class SemanticController {
     }
 
     /**
+     * Elimina tutti i chunk di un documento dall'indice semantico.
+     *
+     * @param fileName nome del file (es. "Zanna Bianca (1).pdf")
+     */
+    @DeleteMapping("/document")
+    public ResponseEntity<Map<String, Object>> deleteDocument(
+            @RequestParam("fileName") String fileName) {
+
+        log.info("Delete semantic chunks request: {}", fileName);
+        long deleted = semanticIndexService.deleteChunksByFileName(fileName);
+
+        if (deleted < 0) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Errore durante la cancellazione", "fileName", fileName));
+        }
+        return ResponseEntity.ok(Map.of(
+                "fileName", fileName,
+                "deleted", deleted,
+                "message", deleted > 0
+                        ? "Chunk eliminati con successo"
+                        : "Nessun chunk trovato per questo file"
+        ));
+    }
+
+    /**
      * Indicizza da un file JSON già estratto nella cartella extracted-documents.
      *
      * @param jsonFileName nome del file JSON
