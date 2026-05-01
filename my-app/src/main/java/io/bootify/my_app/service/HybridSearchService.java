@@ -66,6 +66,18 @@ public class HybridSearchService {
     @Value("${hybrid.search.vector-weight:1.0}")
     private double vectorWeight;
 
+    @Value("${hybrid.search.position-weight:0.5}")
+    private double positionWeight;
+
+    /**
+     * Parole-chiave che segnalano una query sul finale/conclusione narrativa.
+     * Quando presenti, attiva il position boost (chunk con indice alto risalgono).
+     */
+    private static final Set<String> ENDING_SIGNALS = Set.of(
+            "fine", "finale", "conclud", "muore", "muor", "mort", "ultimo",
+            "ultim", "infine", "sopravviv", "conclus", "ending", "dies", "death"
+    );
+
     public HybridSearchService(ElasticsearchClient elasticsearchClient,
                                EmbeddingProvider embeddingProvider) {
         this.elasticsearchClient = elasticsearchClient;
@@ -111,7 +123,17 @@ public class HybridSearchService {
 
         log.debug("BM25: {} risultati, kNN: {} risultati", bm25Results.size(), knnResults.size());
 
-        List<SearchResult> merged = reciprocalRankFusion(bm25Results, knnResults, size);
+        boolean applyPositionBoost = hasEndingSignal(queryText);
+        // Quando la query riguarda il finale, inietta esplicitamente gli ultimi chunk
+        // nel pool di candidati per garantirne la presenza prima della RRF.
+        List<SearchResult> endingChunks = List.of();
+        if (applyPositionBoost) {
+            log.info("Position boost attivato (query sul finale narrativo)");
+            endingChunks = fetchEndingChunks(metadataFilter, size);
+            log.debug("Ending chunks iniettati: {}", endingChunks.size());
+        }
+
+        List<SearchResult> merged = reciprocalRankFusion(bm25Results, knnResults, endingChunks, size, applyPositionBoost);
         log.info("Hybrid RRF: {} risultati finali", merged.size());
         return merged;
     }
@@ -197,12 +219,21 @@ public class HybridSearchService {
     // ── Reciprocal Rank Fusion ────────────────────────────────────────────────
 
     /**
-     * Implementazione di RRF standard (k=60).
-     * Identifica i documenti tramite documentId+chunkIndex come chiave composita.
+     * Implementazione di RRF standard (k=60) con position boost opzionale.
+     *
+     * <p>Quando {@code applyPositionBoost=true} (query sul finale narrativo),
+     * aggiunge un terzo segnale RRF basato sul {@code chunkIndex} discendente:
+     * i chunk vicini alla fine del documento salgono di rank. Il peso è
+     * configurabile tramite {@code hybrid.search.position-weight}.
+     *
+     * <p>{@code endingChunks} è una lista aggiuntiva di chunk finali recuperati
+     * esplicitamente; vengono aggiunti al pool di candidati prima della fusione.
      */
     private List<SearchResult> reciprocalRankFusion(List<SearchResult> bm25List,
                                                      List<SearchResult> knnList,
-                                                     int topK) {
+                                                     List<SearchResult> endingChunks,
+                                                     int topK,
+                                                     boolean applyPositionBoost) {
         Map<String, Double> rrfScores = new HashMap<>();
         Map<String, SearchResult> byKey = new HashMap<>();
 
@@ -224,6 +255,26 @@ public class HybridSearchService {
             byKey.putIfAbsent(key, r);
         }
 
+        // Aggiunge gli ending chunk al pool (senza score iniziale,
+        // contribuiranno solo tramite il position boost sotto)
+        for (SearchResult r : endingChunks) {
+            byKey.putIfAbsent(docKey(r), r);
+            rrfScores.putIfAbsent(docKey(r), 0.0);
+        }
+
+        // Position boost: aggiunge un terzo segnale RRF ordinato per chunkIndex desc
+        if (applyPositionBoost && !byKey.isEmpty()) {
+            List<SearchResult> byPosition = byKey.values().stream()
+                    .sorted(Comparator.comparingInt(
+                            r -> -(r.getChunkIndex() != null ? r.getChunkIndex() : 0)))
+                    .toList();
+            for (int rank = 0; rank < byPosition.size(); rank++) {
+                String key = docKey(byPosition.get(rank));
+                double score = positionWeight / (RRF_K + rank + 1);
+                rrfScores.merge(key, score, Double::sum);
+            }
+        }
+
         // Ordina per RRF score decrescente e prendi i top-K
         return rrfScores.entrySet().stream()
                 .sorted(Map.Entry.<String, Double>comparingByValue(Comparator.reverseOrder()))
@@ -234,6 +285,52 @@ public class HybridSearchService {
                     return r;
                 })
                 .toList();
+    }
+
+    /**
+     * Recupera esplicitamente gli ultimi {@code n*2} chunk del documento
+     * (o dei documenti filtrati) ordinati per chunkIndex discendente.
+     * Usato per garantire che il finale narrativo sia sempre nel pool RRF.
+     */
+    private List<SearchResult> fetchEndingChunks(Map<String, String> metadataFilter, int n) {
+        try {
+            SearchRequest request = SearchRequest.of(s -> s
+                    .index(semanticIndex)
+                    .size(n * 2)
+                    .source(src -> src.filter(f -> f.excludes(EMBEDDING_FIELD)))
+                    .query(q -> {
+                        if (metadataFilter != null && !metadataFilter.isEmpty()) {
+                            return q.bool(b -> {
+                                metadataFilter.forEach((k, v) -> {
+                                    String field = KEYWORD_FIELDS.contains(k) ? k + ".keyword" : k;
+                                    b.filter(f -> f.term(t -> t.field(field).value(v)));
+                                });
+                                return b;
+                            });
+                        }
+                        return q.matchAll(m -> m);
+                    })
+                    .sort(sort -> sort.field(f -> f
+                            .field("chunkIndex")
+                            .order(co.elastic.clients.elasticsearch._types.SortOrder.Desc)))
+            );
+            SearchResponse<SemanticChunk> response =
+                    elasticsearchClient.search(request, SemanticChunk.class);
+            return toSearchResults(response);
+        } catch (Exception e) {
+            log.warn("fetchEndingChunks fallito: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Ritorna true se la query contiene segnali che indicano una domanda
+     * sul finale/conclusione narrativa del documento.
+     */
+    private boolean hasEndingSignal(String query) {
+        if (query == null) return false;
+        String lower = query.toLowerCase();
+        return ENDING_SIGNALS.stream().anyMatch(lower::contains);
     }
 
     private static String docKey(SearchResult r) {
