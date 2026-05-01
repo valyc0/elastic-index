@@ -21,7 +21,7 @@ else
   BODY="{\"query\": \"$QUERY\"}"
 fi
 
-RESPONSE=$(curl -s --max-time 120 -X POST "$URL" \
+RESPONSE=$(curl -s --max-time 300 -X POST "$URL" \
   -H "Content-Type: application/json" \
   -d "$BODY")
 
