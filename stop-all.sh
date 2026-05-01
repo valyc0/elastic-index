@@ -6,14 +6,19 @@ set -euo pipefail
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "» === STOP SPRING BOOT ==="
+# Cerca prima per pattern (spring-boot:run o jar), poi per porta 8080
 PIDS=$(pgrep -f "my-app.*\.jar\|spring-boot:run" 2>/dev/null || true)
-if [[ -n "$PIDS" ]]; then
-    echo "  Stopping Spring Boot (PID: $PIDS)..."
-    kill $PIDS
+PIDS_PORT=$(lsof -ti tcp:8080 2>/dev/null || true)
+ALL_PIDS=$(echo "$PIDS $PIDS_PORT" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+
+if [[ -n "$ALL_PIDS" ]]; then
+    echo "  Stopping Spring Boot (PID: $ALL_PIDS)..."
+    kill $ALL_PIDS 2>/dev/null || true
     sleep 2
     # forza se ancora attivo
-    REMAINING=$(pgrep -f "my-app.*\.jar\|spring-boot:run" 2>/dev/null || true)
+    REMAINING=$(lsof -ti tcp:8080 2>/dev/null || true)
     if [[ -n "$REMAINING" ]]; then
+        echo "  Forzo kill (PID: $REMAINING)..."
         kill -9 $REMAINING 2>/dev/null || true
     fi
     echo "  ✔ Spring Boot fermato"

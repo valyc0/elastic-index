@@ -97,8 +97,12 @@ public class SemanticIndexService {
 
         // 1. Genera tutti gli embedding prima di modificare l'indice.
         //    Un eventuale errore qui non altera i dati già presenti.
+        List<String> texts = chunks.stream().map(ChunkEntry::content).toList();
+        List<List<Float>> embeddings = embeddingProvider.embedBatch(texts);
+
         List<SemanticChunk> preparedChunks = new ArrayList<>(chunks.size());
-        for (ChunkEntry entry : chunks) {
+        for (int i = 0; i < chunks.size(); i++) {
+            ChunkEntry entry = chunks.get(i);
             SemanticChunk chunk = new SemanticChunk();
             chunk.setDocumentId(documentId);
             chunk.setFileName(result.getFileName());
@@ -106,7 +110,7 @@ public class SemanticIndexService {
             chunk.setContent(entry.content());
             chunk.setChapterTitle(entry.chapterTitle());
             chunk.setChapterIndex(entry.chapterIndex());
-            chunk.setContentEmbedding(embeddingProvider.embed(entry.content()));
+            chunk.setContentEmbedding(embeddings.get(i));
             preparedChunks.add(chunk);
         }
         log.debug("Embedding generati: {}/{}", preparedChunks.size(), chunks.size());
@@ -176,7 +180,7 @@ public class SemanticIndexService {
         try {
             DeleteByQueryResponse response = elasticsearchClient.deleteByQuery(d -> d
                     .index(semanticIndex)
-                    .query(q -> q.term(t -> t.field("fileName").value(fileName)))
+                    .query(q -> q.term(t -> t.field("fileName.keyword").value(fileName)))
             );
             long deleted = response.deleted() != null ? response.deleted() : 0;
             if (deleted > 0) {

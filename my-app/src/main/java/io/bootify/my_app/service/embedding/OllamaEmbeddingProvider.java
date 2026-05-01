@@ -2,6 +2,7 @@ package io.bootify.my_app.service.embedding;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,10 +41,12 @@ public class OllamaEmbeddingProvider implements EmbeddingProvider {
     public OllamaEmbeddingProvider(
             @Value("${ollama.url:http://localhost:11434}") String ollamaUrl,
             @Value("${ollama.embed.model:nomic-embed-text}") String embedModel,
-            @Value("${ollama.embed.dimensions:768}") int dimensions) {
+            @Value("${ollama.embed.dimensions:768}") int dimensions,
+            @Value("${ollama.embed.batch-size:32}") int batchSize) {
         this.ollamaUrl = ollamaUrl;
         this.embedModel = embedModel;
         this.dimensions = dimensions;
+        this.batchSize = batchSize;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
                 .build();
@@ -59,6 +62,7 @@ public class OllamaEmbeddingProvider implements EmbeddingProvider {
             ObjectNode body = objectMapper.createObjectNode();
             body.put("model", embedModel);
             body.put("prompt", text);
+            body.put("keep_alive", -1);
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(ollamaUrl + "/api/embeddings"))
@@ -93,6 +97,75 @@ public class OllamaEmbeddingProvider implements EmbeddingProvider {
             throw e;
         } catch (Exception e) {
             throw new EmbeddingException("Errore nella chiamata a Ollama: " + e.getMessage(), e);
+        }
+    }
+
+    private final int batchSize;
+
+    /**
+     * Embedding batch usando l'endpoint {@code /api/embed} di Ollama (≥ 0.1.35).
+     *
+     * <p>I testi vengono suddivisi in sotto-batch da {@value BATCH_SIZE} elementi
+     * per evitare request HTTP troppo grandi su documenti voluminosi.
+     * Il modello rimane caricato in RAM tra i sotto-batch grazie a {@code keep_alive: -1}.
+     */
+    @Override
+    public List<List<Float>> embedBatch(List<String> texts) {
+        if (texts == null || texts.isEmpty()) return List.of();
+        List<List<Float>> results = new ArrayList<>(texts.size());
+        for (int start = 0; start < texts.size(); start += batchSize) {
+            List<String> subBatch = texts.subList(start, Math.min(start + batchSize, texts.size()));
+            results.addAll(embedBatchInternal(subBatch));
+            log.debug("Batch embedding: {}/{} completati", Math.min(start + batchSize, texts.size()), texts.size());
+        }
+        return results;
+    }
+
+    private List<List<Float>> embedBatchInternal(List<String> texts) {
+        try {
+            ObjectNode body = objectMapper.createObjectNode();
+            body.put("model", embedModel);
+            body.put("keep_alive", -1);
+            ArrayNode inputArray = body.putArray("input");
+            texts.forEach(inputArray::add);
+
+            long timeoutSec = Math.min(texts.size() * 10L + 60, 600);
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(ollamaUrl + "/api/embed"))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+                    .timeout(Duration.ofSeconds(timeoutSec))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request,
+                    HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() != 200) {
+                throw new EmbeddingException(
+                        "Ollama batch embed error HTTP " + response.statusCode() + ": " + response.body());
+            }
+
+            JsonNode root = objectMapper.readTree(response.body());
+            JsonNode embeddingsNode = root.get("embeddings");
+            if (embeddingsNode == null || !embeddingsNode.isArray()) {
+                throw new EmbeddingException(
+                        "Risposta Ollama priva del campo 'embeddings': " + response.body());
+            }
+
+            List<List<Float>> subResults = new ArrayList<>(embeddingsNode.size());
+            for (JsonNode embNode : embeddingsNode) {
+                List<Float> vector = new ArrayList<>(embNode.size());
+                for (JsonNode v : embNode) {
+                    vector.add(v.floatValue());
+                }
+                subResults.add(vector);
+            }
+            return subResults;
+
+        } catch (EmbeddingException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new EmbeddingException("Errore nel batch Ollama: " + e.getMessage(), e);
         }
     }
 
