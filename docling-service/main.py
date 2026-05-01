@@ -7,41 +7,189 @@ Usa Docling (IBM) per estrarre titoli, sezioni, tabelle e paragrafi.
 Endpoints:
   POST /parse         - upload file, restituisce struttura completa
   GET  /health        - health check
+
+Configurazione via variabili d'ambiente:
+  DOCLING_THREADS        numero di thread CPU per modello (default: tutti i core)
+  DOCLING_MAX_CONCURRENT numero massimo di conversioni simultanee (default: 2)
+  DOCLING_TIMEOUT_SEC    timeout per singola conversione in secondi (default: 300)
+  DOCLING_MAX_FILE_MB    dimensione massima file in MB (default: 100)
+  DOCLING_DEVICE         dispositivo acceleratore: CPU | CUDA | MPS | AUTO (default: AUTO)
 """
 
 import asyncio
-import io
 import logging
 import tempfile
 import os
+import functools
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from docling.document_converter import DocumentConverter
+from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.document_converter import PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions, AcceleratorOptions
+from docling.datamodel.document import SectionHeaderItem, TextItem, TableItem
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ── Configurazione da environment ─────────────────────────────────────────────
+
+_NUM_THREADS    = int(os.environ.get("DOCLING_THREADS", os.cpu_count() or 4))
+_MAX_CONCURRENT = int(os.environ.get("DOCLING_MAX_CONCURRENT", 2))
+_TIMEOUT_SEC    = int(os.environ.get("DOCLING_TIMEOUT_SEC", 300))
+_MAX_FILE_MB    = int(os.environ.get("DOCLING_MAX_FILE_MB", 100))
+_DEVICE_STR     = os.environ.get("DOCLING_DEVICE", "AUTO").upper()
+
+_DEVICE_MAP = {
+    "CPU":  "cpu",
+    "CUDA": "cuda",
+    "MPS":  "mps",
+}
+_DEVICE = _DEVICE_MAP.get(_DEVICE_STR, "cpu")
+
+logger.info(
+    "Docling config: threads=%d, max_concurrent=%d, timeout=%ds, max_file=%dMB, device=%s",
+    _NUM_THREADS, _MAX_CONCURRENT, _TIMEOUT_SEC, _MAX_FILE_MB, _DEVICE_STR,
+)
+
+# ── Semaforo: limita le conversioni concorrenti ───────────────────────────────
+# I modelli PyTorch non sono thread-safe per inferenza parallela.
+# Il semaforo serializza l'accesso garantendo al massimo _MAX_CONCURRENT
+# conversioni attive contemporaneamente.
+_semaphore: asyncio.Semaphore  # inizializzato in startup
+
+
+def _make_converter() -> DocumentConverter:
+    """Crea un converter Docling isolato (uno per processo worker)."""
+    opts = PdfPipelineOptions()
+    opts.do_ocr = False
+    opts.do_table_structure = True
+    opts.generate_page_images = False
+    opts.generate_picture_images = False
+    opts.accelerator_options = AcceleratorOptions(
+        num_threads=_NUM_THREADS,
+        device=_DEVICE,
+    )
+    return DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
+    )
+
+
+# ── Worker process pool ───────────────────────────────────────────────────────
+# Ogni worker ha il proprio converter inizializzato una volta sola
+# (aggira il GIL per workload CPU-bound).
+_worker_pool: ProcessPoolExecutor
+_worker_converter: Optional[DocumentConverter] = None  # solo nei processi worker
+
+
+def _worker_init():
+    """Inizializzazione del processo worker: carica i modelli una sola volta."""
+    global _worker_converter
+    _worker_converter = _make_converter()
+    logger.info("Worker PID=%d: converter inizializzato", os.getpid())
+
+
+def _convert_in_worker(tmp_path: str) -> dict:
+    """
+    Eseguito nel processo worker.
+    Converte il file e restituisce un dict serializzabile (no oggetti Docling).
+    """
+    result = _worker_converter.convert(tmp_path)
+    doc = result.document
+
+    sections_raw = []
+    tables_raw = []
+    chapter_index = 0
+    current_h1_title = None
+    current_h1_index = None
+
+    for item, _ in doc.iterate_items():
+        if isinstance(item, SectionHeaderItem):
+            heading_level = int(item.level) if hasattr(item, "level") else 1
+            page = _get_page(item)
+            if heading_level == 1:
+                current_h1_title = item.text
+                current_h1_index = chapter_index
+                sections_raw.append(dict(
+                    title=item.text, chapter_index=chapter_index,
+                    text="", level=1, page_number=page,
+                    parent_chapter_title=None, parent_chapter_index=None,
+                ))
+            else:
+                sections_raw.append(dict(
+                    title=item.text, chapter_index=chapter_index,
+                    text="", level=heading_level, page_number=page,
+                    parent_chapter_title=current_h1_title,
+                    parent_chapter_index=current_h1_index,
+                ))
+            chapter_index += 1
+
+        elif isinstance(item, TextItem):
+            if sections_raw:
+                sep = " " if sections_raw[-1]["text"] else ""
+                sections_raw[-1]["text"] += sep + item.text
+            elif item.text.strip():
+                sections_raw.append(dict(
+                    title="", chapter_index=chapter_index,
+                    text=item.text, level=0, page_number=None,
+                    parent_chapter_title=None, parent_chapter_index=None,
+                ))
+                chapter_index += 1
+
+        elif isinstance(item, TableItem):
+            try:
+                df = item.export_to_dataframe()
+                text_repr = df.to_string(index=False)
+            except Exception:
+                text_repr = item.export_to_markdown() if hasattr(item, "export_to_markdown") else ""
+            if text_repr.strip():
+                tables_raw.append(dict(
+                    caption=getattr(item, "caption", None),
+                    text_representation=text_repr,
+                    page_number=_get_page(item),
+                ))
+
+    sections_raw = [s for s in sections_raw if len(s["text"].strip()) >= 10]
+
+    metadata: dict[str, str] = {}
+    if hasattr(doc, "metadata") and doc.metadata:
+        for k, v in vars(doc.metadata).items():
+            if v is not None:
+                metadata[str(k)] = str(v)
+
+    page_count = len(doc.pages) if hasattr(doc, "pages") and doc.pages else None
+
+    return dict(
+        full_text=doc.export_to_text(),
+        sections=sections_raw,
+        tables=tables_raw,
+        metadata=metadata,
+        page_count=page_count,
+    )
+
+
 app = FastAPI(title="Docling Parsing Service", version="1.0.0")
 
-# ── Configurazione pipeline Docling ──────────────────────────────────────────
 
-pdf_options = PdfPipelineOptions()
-pdf_options.do_ocr = False          # disabilita OCR per velocità (abilitare se si hanno scansioni)
-pdf_options.do_table_structure = True  # estrae struttura tabelle
+@app.on_event("startup")
+async def startup():
+    global _semaphore, _worker_pool
+    _semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
+    _worker_pool = ProcessPoolExecutor(
+        max_workers=_MAX_CONCURRENT,
+        initializer=_worker_init,
+    )
+    logger.info("ProcessPoolExecutor avviato con %d worker(s)", _MAX_CONCURRENT)
 
-converter = DocumentConverter(
-    format_options={
-        InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options),
-    }
-)
+
+@app.on_event("shutdown")
+async def shutdown():
+    _worker_pool.shutdown(wait=False)
+    logger.info("ProcessPoolExecutor fermato")
 
 # ── Modelli risposta ──────────────────────────────────────────────────────────
 
@@ -49,14 +197,14 @@ class ParsedSection(BaseModel):
     title: str
     chapter_index: int
     text: str
-    level: int              # livello gerarchico del titolo (1=H1/capitolo, 2=H2/sezione, ecc.)
+    level: int
     page_number: Optional[int] = None
-    parent_chapter_title: Optional[str] = None   # titolo del capitolo H1 padre (None se è già H1)
-    parent_chapter_index: Optional[int] = None   # chapter_index del capitolo H1 padre
+    parent_chapter_title: Optional[str] = None
+    parent_chapter_index: Optional[int] = None
 
 class ParsedTable(BaseModel):
     caption: Optional[str]
-    text_representation: str   # tabella convertita in testo per embedding
+    text_representation: str
     page_number: Optional[int] = None
 
 class ParseResponse(BaseModel):
@@ -78,14 +226,7 @@ def health():
 async def parse_document(file: UploadFile = File(...)):
     """
     Parsa un documento con Docling ed estrae struttura gerarchica.
-
-    Accetta: PDF, DOCX, HTML, PPTX, XLSX, Markdown, AsciiDoc
-
-    Restituisce:
-    - full_text: testo completo del documento
-    - sections: lista di sezioni con titolo, testo e livello gerarchico
-    - tables: tabelle estratte convertite in testo
-    - metadata: metadati documento (autore, titolo, ecc.)
+    Accetta: PDF, DOCX, HTML, PPTX, XLSX, Markdown, AsciiDoc.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="Nome file mancante")
@@ -95,127 +236,60 @@ async def parse_document(file: UploadFile = File(...)):
     if suffix not in allowed:
         raise HTTPException(
             status_code=415,
-            detail=f"Formato non supportato: {suffix}. Supportati: {allowed}"
+            detail=f"Formato non supportato: {suffix}. Supportati: {allowed}",
         )
 
-    logger.info("Parsing documento: %s", file.filename)
+    content = await file.read()
 
-    # Salva temporaneamente il file su disco (Docling richiede path)
+    # Limite dimensione file
+    max_bytes = _MAX_FILE_MB * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File troppo grande: {len(content) // (1024*1024)}MB (max {_MAX_FILE_MB}MB)",
+        )
+
+    logger.info("Parsing documento: %s (%.1f MB)", file.filename, len(content) / (1024 * 1024))
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
 
     try:
-        # Esegui il parsing in un thread separato per non bloccare l'event loop
-        result = await asyncio.to_thread(converter.convert, tmp_path)
-        doc = result.document
-
-        # ── Estrai sezioni strutturate con gerarchia capitoli ────────────────
-        sections: list[ParsedSection] = []
-        chapter_index = 0
-
-        # Traccia il capitolo H1 corrente per ereditarlo alle sottosezioni
-        current_h1_title: Optional[str] = None
-        current_h1_index: Optional[int] = None
-
-        for item, _ in doc.iterate_items():
-            from docling.datamodel.document import SectionHeaderItem, TextItem, TableItem
-
-            if isinstance(item, SectionHeaderItem):
-                heading_level = int(item.level) if hasattr(item, "level") else 1
-
-                if heading_level == 1:
-                    # Capitolo principale: aggiorna il capitolo H1 corrente
-                    current_h1_title = item.text
-                    current_h1_index = chapter_index
-                    sections.append(ParsedSection(
-                        title=item.text,
-                        chapter_index=chapter_index,
-                        text="",
-                        level=1,
-                        page_number=_get_page(item),
-                        parent_chapter_title=None,
-                        parent_chapter_index=None,
-                    ))
-                else:
-                    # Sottosezione H2/H3/...: eredita il capitolo H1 padre
-                    sections.append(ParsedSection(
-                        title=item.text,
-                        chapter_index=chapter_index,
-                        text="",
-                        level=heading_level,
-                        page_number=_get_page(item),
-                        parent_chapter_title=current_h1_title,
-                        parent_chapter_index=current_h1_index,
-                    ))
-                chapter_index += 1
-
-            elif isinstance(item, TextItem):
-                if sections:
-                    sep = " " if sections[-1].text else ""
-                    sections[-1].text += sep + item.text
-                elif item.text.strip():
-                    # Testo prima del primo titolo (es. abstract, premessa)
-                    sections.append(ParsedSection(
-                        title="",
-                        chapter_index=chapter_index,
-                        text=item.text,
-                        level=0,
-                        parent_chapter_title=None,
-                        parent_chapter_index=None,
-                    ))
-                    chapter_index += 1
-
-        # Rimuovi sezioni con testo troppo breve (< 10 caratteri)
-        sections = [s for s in sections if len(s.text.strip()) >= 10]
-
-        # ── Estrai tabelle ────────────────────────────────────────────────────
-        tables: list[ParsedTable] = []
-        for item, _ in doc.iterate_items():
-            from docling.datamodel.document import TableItem
-            if isinstance(item, TableItem):
-                try:
-                    df = item.export_to_dataframe()
-                    text_repr = df.to_string(index=False)
-                except Exception:
-                    text_repr = item.export_to_markdown() if hasattr(item, "export_to_markdown") else ""
-
-                if text_repr.strip():
-                    tables.append(ParsedTable(
-                        caption=getattr(item, "caption", None),
-                        text_representation=text_repr,
-                        page_number=_get_page(item),
-                    ))
-
-        # ── Testo completo ────────────────────────────────────────────────────
-        full_text = doc.export_to_text()
-
-        # ── Metadati ──────────────────────────────────────────────────────────
-        metadata: dict[str, str] = {"fileName": file.filename}
-        if hasattr(doc, "metadata") and doc.metadata:
-            for k, v in vars(doc.metadata).items():
-                if v is not None:
-                    metadata[str(k)] = str(v)
-
-        page_count = None
-        if hasattr(doc, "pages") and doc.pages:
-            page_count = len(doc.pages)
+        # Acquisisce il semaforo prima di entrare nel worker pool:
+        # garantisce al massimo _MAX_CONCURRENT conversioni attive.
+        async with _semaphore:
+            loop = asyncio.get_running_loop()
+            try:
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _worker_pool,
+                        functools.partial(_convert_in_worker, tmp_path),
+                    ),
+                    timeout=_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Timeout: conversione superato {_TIMEOUT_SEC}s",
+                )
 
         logger.info(
             "Parsing completato: %s | sezioni=%d, tabelle=%d, pagine=%s",
-            file.filename, len(sections), len(tables), page_count
+            file.filename, len(raw["sections"]), len(raw["tables"]), raw["page_count"],
         )
 
         return ParseResponse(
             file_name=file.filename,
-            full_text=full_text,
-            sections=sections,
-            tables=tables,
-            metadata=metadata,
-            page_count=page_count,
+            full_text=raw["full_text"],
+            sections=[ParsedSection(**s) for s in raw["sections"]],
+            tables=[ParsedTable(**t) for t in raw["tables"]],
+            metadata={"fileName": file.filename, **raw["metadata"]},
+            page_count=raw["page_count"],
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Errore nel parsing di %s", file.filename)
         raise HTTPException(status_code=500, detail=f"Errore parsing: {str(e)}")

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
@@ -57,11 +55,22 @@ services:
       - "8001:8001"
     networks:
       - elastic
-    # Docling scarica i modelli al primo avvio: aumentare se necessario
+    environment:
+      # Numero di thread CPU per modello (default: tutti i core del container)
+      - DOCLING_THREADS=${DOCLING_THREADS:-12}
+      # Conversioni simultanee — ogni worker carica i modelli in RAM (~2-3GB ciascuno)
+      # Su macchine con poca RAM tenere a 1; aumentare solo con GPU o >32GB RAM
+      - DOCLING_MAX_CONCURRENT=${DOCLING_MAX_CONCURRENT:-1}
+      # Timeout per singola conversione in secondi
+      - DOCLING_TIMEOUT_SEC=${DOCLING_TIMEOUT_SEC:-300}
+      # Dimensione massima file in MB
+      - DOCLING_MAX_FILE_MB=${DOCLING_MAX_FILE_MB:-100}
+      # Dispositivo: cpu, cuda, mps
+      - DOCLING_DEVICE=${DOCLING_DEVICE:-cpu}
     deploy:
       resources:
         limits:
-          memory: 4g
+          memory: 8g
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
