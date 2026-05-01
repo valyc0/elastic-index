@@ -4,7 +4,7 @@
 # Uso:
 #   ./ingest-docling.sh [percorso/al/documento.pdf]
 #
-# Se non si passa un file, usa "ventimila-leghe.pdf" nella stessa cartella.
+# Se non si passa un file, usa "esempi/ventimila-leghe.pdf".
 # Presuppone che la stack sia già avviata (./start-all.sh).
 
 set -euo pipefail
@@ -15,7 +15,7 @@ DOCLING_URL="${DOCLING_URL:-http://localhost:8001}"
 ES_URL="${ES_URL:-http://localhost:9200}"
 QUERY="${QUERY:-Chi è il capitano Nemo e cosa guida?}"
 TOP_K="${TOP_K:-3}"
-TEST_FILE="${1:-$SCRIPT_DIR/ventimila-leghe.pdf}"
+TEST_FILE="${1:-$SCRIPT_DIR/esempi/ventimila-leghe.pdf}"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}  ✔ $*${NC}"; }
