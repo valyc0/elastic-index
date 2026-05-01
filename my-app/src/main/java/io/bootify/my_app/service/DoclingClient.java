@@ -44,11 +44,14 @@ public class DoclingClient {
     private final String doclingUrl;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
+    private final Duration requestTimeout;
 
     public DoclingClient(
             @Value("${docling.url:http://localhost:8001}") String doclingUrl,
+            @Value("${docling.timeout-seconds:600}") int timeoutSeconds,
             ObjectMapper objectMapper) {
         this.doclingUrl = doclingUrl;
+        this.requestTimeout = Duration.ofSeconds(timeoutSeconds);
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .version(HTTP_1_1)   // HTTP/2 può causare problemi con multipart/form-data su uvicorn
@@ -80,7 +83,7 @@ public class DoclingClient {
                     .uri(URI.create(doclingUrl + "/parse"))
                     .header("Content-Type", "multipart/form-data; boundary=" + boundary)
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body))
-                    .timeout(Duration.ofMinutes(5))   // parsing PDF lunghi può richiedere tempo
+                    .timeout(requestTimeout)
                     .build();
 
             HttpResponse<String> response = httpClient.send(request,
