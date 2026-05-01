@@ -33,6 +33,12 @@ public class RagRequest {
     private String documentId;
 
     /**
+     * Limita la ricerca ai chunk di uno specifico file (es. "Zanna Bianca (1).pdf").
+     * Se null, la ricerca è corpus-wide.
+     */
+    private String fileName;
+
+    /**
      * ID della sessione conversazionale, ottenuto da {@code POST /api/rag/session}.
      * Lo storico dei turni precedenti è mantenuto server-side e recuperato automaticamente.
      * Se null o non trovato, la richiesta viene trattata come primo turno senza storia.
@@ -55,6 +61,9 @@ public class RagRequest {
 
     public String getDocumentId() { return documentId; }
     public void setDocumentId(String documentId) { this.documentId = documentId; }
+
+    public String getFileName() { return fileName; }
+    public void setFileName(String fileName) { this.fileName = fileName; }
 
     public String getSessionId() { return sessionId; }
     public void setSessionId(String sessionId) { this.sessionId = sessionId; }

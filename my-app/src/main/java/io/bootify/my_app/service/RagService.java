@@ -388,6 +388,15 @@ public class RagService {
         if (request.getDocumentId() != null && !request.getDocumentId().isBlank()) {
             filter.put("documentId", request.getDocumentId());
         }
+        if (request.getFileName() != null && !request.getFileName().isBlank()) {
+            // Risolve il nome parziale/approssimativo al fileName esatto nell'indice
+            String resolved = hybridSearchService.resolveFileName(request.getFileName())
+                    .orElse(request.getFileName());
+            if (!resolved.equals(request.getFileName())) {
+                log.info("fileName '{}' risolto in '{}'", request.getFileName(), resolved);
+            }
+            filter.put("fileName", resolved);
+        }
         return filter;
     }
 

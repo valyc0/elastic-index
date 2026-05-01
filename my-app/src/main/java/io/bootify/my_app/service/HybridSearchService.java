@@ -4,6 +4,7 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
+import co.elastic.clients.elasticsearch._types.aggregations.StringTermsBucket;
 import io.bootify.my_app.model.SearchResult;
 import io.bootify.my_app.model.SemanticChunk;
 import io.bootify.my_app.service.embedding.EmbeddingProvider;
@@ -17,6 +18,8 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -47,6 +50,9 @@ public class HybridSearchService {
 
     private static final String EMBEDDING_FIELD = "content_embedding";
     private static final int RRF_K = 60;
+
+    /** Campi text che hanno un sub-field .keyword da usare nei term filter. */
+    private static final Set<String> KEYWORD_FIELDS = Set.of("fileName", "chapterTitle");
 
     private final ElasticsearchClient elasticsearchClient;
     private final EmbeddingProvider embeddingProvider;
@@ -133,8 +139,10 @@ public class HybridSearchService {
                                 .fuzziness("AUTO")
                         ));
                         if (metadataFilter != null) {
-                            metadataFilter.forEach((k, v) ->
-                                    b.filter(f -> f.term(t -> t.field(k).value(v))));
+                            metadataFilter.forEach((k, v) -> {
+                                String field = KEYWORD_FIELDS.contains(k) ? k + ".keyword" : k;
+                                b.filter(f -> f.term(t -> t.field(field).value(v)));
+                            });
                         }
                         return b;
                     }))
@@ -167,8 +175,10 @@ public class HybridSearchService {
                                 .numCandidates(Math.min(size * 5, 500))
                                 .k(size);
                         if (metadataFilter != null) {
-                            metadataFilter.forEach((key, value) ->
-                                    k.filter(f -> f.term(t -> t.field(key).value(value))));
+                            metadataFilter.forEach((key, value) -> {
+                                String field = KEYWORD_FIELDS.contains(key) ? key + ".keyword" : key;
+                                k.filter(f -> f.term(t -> t.field(field).value(value)));
+                            });
                         }
                         return k;
                     })
@@ -228,6 +238,63 @@ public class HybridSearchService {
 
     private static String docKey(SearchResult r) {
         return r.getDocumentId() + ":" + r.getChunkIndex();
+    }
+
+    // ── Documenti indicizzati ─────────────────────────────────────────────────
+
+    /**
+     * Restituisce tutti i fileName distinti presenti nell'indice.
+     */
+    public List<String> listDocuments() {
+        try {
+            var response = elasticsearchClient.search(s -> s
+                    .index(semanticIndex)
+                    .size(0)
+                    .aggregations("files", a -> a
+                            .terms(t -> t.field("fileName.keyword").size(500))),
+                    SemanticChunk.class);
+
+            return response.aggregations().get("files")
+                    .sterms().buckets().array().stream()
+                    .map(StringTermsBucket::key)
+                    .map(k -> k.stringValue())
+                    .sorted()
+                    .toList();
+        } catch (Exception e) {
+            log.warn("Impossibile listare i documenti: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Risolve un nome file parziale/approssimativo al fileName esatto presente nell'indice.
+     *
+     * <p>Usa una {@code match} query con fuzziness su {@code fileName} per trovare
+     * il documento più simile, senza richiedere il nome esatto.
+     *
+     * @param hint stringa parziale fornita dall'utente (es. "zanna bianca", "ventimila")
+     * @return fileName esatto se trovato, altrimenti {@code Optional.empty()}
+     */
+    public Optional<String> resolveFileName(String hint) {
+        try {
+            var response = elasticsearchClient.search(s -> s
+                    .index(semanticIndex)
+                    .size(1)
+                    .source(src -> src.filter(f -> f.includes("fileName")))
+                    .query(q -> q.match(m -> m
+                            .field("fileName")
+                            .query(hint)
+                            .fuzziness("AUTO"))),
+                    SemanticChunk.class);
+
+            return response.hits().hits().stream()
+                    .findFirst()
+                    .map(Hit::source)
+                    .map(SemanticChunk::getFileName);
+        } catch (Exception e) {
+            log.warn("Risoluzione fileName fallita per hint='{}': {}", hint, e.getMessage());
+            return Optional.empty();
+        }
     }
 
     // ── Conversione risposta ES → SearchResult ────────────────────────────────

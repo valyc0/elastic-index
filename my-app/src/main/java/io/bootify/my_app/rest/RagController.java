@@ -6,8 +6,6 @@ import io.bootify.my_app.model.SearchResult;
 import io.bootify.my_app.service.ConversationSessionService;
 import io.bootify.my_app.service.HybridSearchService;
 import io.bootify.my_app.service.RagService;
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -25,6 +23,7 @@ import java.util.Map;
  *   <li>{@code DELETE /api/rag/session/{id}} – elimina esplicitamente una sessione</li>
  *   <li>{@code POST /api/rag/ask}            – domanda RAG completa (retrieval + LLM)</li>
  *   <li>{@code POST /api/rag/search}         – hybrid search senza generazione LLM</li>
+ *   <li>{@code GET  /api/rag/documents}      – lista file indicizzati (per autocomplete)</li>
  *   <li>{@code GET  /api/rag/health}         – verifica disponibilità servizi</li>
  * </ul>
  */
@@ -132,6 +131,23 @@ public class RagController {
             log.error("Errore nella ricerca ibrida", e);
             return ResponseEntity.internalServerError().build();
         }
+    }
+
+    /**
+     * Lista tutti i fileName distinti presenti nell'indice semantico.
+     *
+     * <p>Utile per costruire una UI con autocomplete o dropdown per filtrare
+     * la ricerca per documento. Il campo {@code fileName} della {@code RagRequest}
+     * accetta anche nomi parziali/approssimativi: il server li risolve automaticamente.
+     *
+     * <pre>
+     * GET /api/rag/documents
+     * → ["ventimila-leghe.pdf", "Zanna Bianca (1).pdf", ...]
+     * </pre>
+     */
+    @GetMapping("/documents")
+    public ResponseEntity<List<String>> listDocuments() {
+        return ResponseEntity.ok(hybridSearchService.listDocuments());
     }
 
     /**

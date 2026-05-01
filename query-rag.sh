@@ -1,16 +1,29 @@
 #!/bin/bash
 # Esegue solo la query RAG (presuppone Spring Boot già avviato)
-# Uso: ./query-rag.sh "domanda"   oppure   QUERY="domanda" ./query-rag.sh
+#
+# Uso:
+#   ./query-rag.sh "domanda"
+#   ./query-rag.sh "domanda" "nome file parziale"
+#   QUERY="domanda" FILE="zanna bianca" ./query-rag.sh
 
 QUERY="${1:-${QUERY:-Chi è il capitano Nemo e cosa guida?}}"
-URL="http://localhost:8080/api/docling/ask"
+FILE="${2:-${FILE:-}}"
+URL="http://localhost:8080/api/rag/ask"
 
 echo "» query: \"$QUERY\""
+[[ -n "$FILE" ]] && echo "» filtro file: \"$FILE\""
 echo ""
+
+# Costruisce il body JSON con o senza fileName
+if [[ -n "$FILE" ]]; then
+  BODY="{\"query\": \"$QUERY\", \"fileName\": \"$FILE\"}"
+else
+  BODY="{\"query\": \"$QUERY\"}"
+fi
 
 RESPONSE=$(curl -s --max-time 120 -X POST "$URL" \
   -H "Content-Type: application/json" \
-  -d "{\"query\": \"$QUERY\"}")
+  -d "$BODY")
 
 if [ $? -ne 0 ] || [ -z "$RESPONSE" ]; then
   echo "✗ Errore: nessuna risposta da $URL"
