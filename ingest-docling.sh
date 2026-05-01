@@ -63,15 +63,20 @@ step "2. INDICIZZAZIONE (POST $BASE_URL/api/docling/index)"
 info "File: $(basename "$TEST_FILE")"
 info "Parsing in corso — può richiedere diversi minuti su CPU..."
 
+_T0=$(date +%s)
 INDEX_RESP=$(curl -s --max-time 600 -X POST "$BASE_URL/api/docling/index" \
   -F "file=@$TEST_FILE" 2>/dev/null || echo "{}")
+_T1=$(date +%s)
+_ELAPSED=$(( _T1 - _T0 ))
+_MIN=$(( _ELAPSED / 60 ))
+_SEC=$(( _ELAPSED % 60 ))
 
 DOC_ID=$(echo "$INDEX_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('documentId',''))" 2>/dev/null || echo "")
 CHUNKS=$(echo "$INDEX_RESP"  | python3 -c "import sys,json; print(json.load(sys.stdin).get('chunks',0))" 2>/dev/null || echo "0")
 SECTIONS=$(echo "$INDEX_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('sections',0))" 2>/dev/null || echo "0")
 
 if [[ -n "$DOC_ID" && "$CHUNKS" -gt 0 ]]; then
-  ok "Indicizzazione OK — documentId=$DOC_ID, sezioni=$SECTIONS, chunks=$CHUNKS"
+  ok "Indicizzazione OK — documentId=$DOC_ID, sezioni=$SECTIONS, chunks=$CHUNKS, tempo=${_MIN}m${_SEC}s"
 else
   fail "Indicizzazione fallita — risposta: ${INDEX_RESP:0:400}"
   echo "  Log Spring Boot (ultime 30 righe):"
@@ -136,5 +141,6 @@ echo -e "${GREEN}━━ INGESTION COMPLETATA ━━${NC}"
 echo ""
 echo "  Documento : $(basename "$TEST_FILE")"
 echo "  Chunks    : $CHUNKS"
+echo "  Tempo     : ${_MIN}m${_SEC}s"
 echo "  Query RAG : $QUERY"
 echo ""
