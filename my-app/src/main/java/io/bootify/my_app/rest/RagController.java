@@ -124,8 +124,9 @@ public class RagController {
         try {
             int topK = request.getTopK() != null ? request.getTopK() : 10;
             log.info("Hybrid search: query='{}', topK={}", request.getQuery(), topK);
+            Map<String, String> filter = ragService.resolveFilter(request);
             List<SearchResult> results = hybridSearchService.search(
-                    request.getQuery(), topK, request.getMetadataFilter());
+                    request.getQuery(), topK, filter.isEmpty() ? null : filter);
             return ResponseEntity.ok(results);
         } catch (Exception e) {
             log.error("Errore nella ricerca ibrida", e);

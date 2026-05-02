@@ -14,13 +14,16 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 /**
  * Servizio di ricerca ibrida che combina BM25 (full-text) e kNN (vector similarity).
@@ -69,6 +72,21 @@ public class HybridSearchService {
     @Value("${hybrid.search.position-weight:0.5}")
     private double positionWeight;
 
+    @Value("${hybrid.search.rerank.enabled:true}")
+    private boolean rerankEnabled;
+
+    @Value("${hybrid.search.rerank.window:40}")
+    private int rerankWindow;
+
+    @Value("${hybrid.search.rerank.rrf-weight:0.65}")
+    private double rerankRrfWeight;
+
+    @Value("${hybrid.search.rerank.term-overlap-weight:0.25}")
+    private double rerankTermOverlapWeight;
+
+    @Value("${hybrid.search.rerank.title-match-weight:0.10}")
+    private double rerankTitleMatchWeight;
+
     /**
      * Parole-chiave che segnalano una query sul finale/conclusione narrativa.
      * Quando presenti, attiva il position boost (chunk con indice alto risalgono).
@@ -77,6 +95,17 @@ public class HybridSearchService {
             "fine", "finale", "conclud", "muore", "muor", "mort", "ultimo",
             "ultim", "infine", "sopravviv", "conclus", "ending", "dies", "death"
     );
+
+        /** Stop words leggere per non far pesare troppo termini funzionali nel reranking. */
+        private static final Set<String> RERANK_STOP_WORDS = Set.of(
+            "a", "ad", "al", "alla", "alle", "allo", "ai", "agli",
+            "da", "dal", "dalla", "dalle", "dello", "degli", "dei",
+            "di", "e", "ed", "il", "la", "le", "lo", "gli", "i",
+            "in", "nel", "nella", "nelle", "per", "su", "tra", "con",
+            "un", "una", "uno", "the", "and", "for", "with", "what",
+            "when", "where", "which", "who", "why", "how", "sono", "come",
+            "cosa", "quale", "quali", "chi", "dove", "quando", "perche", "perché"
+        );
 
     public HybridSearchService(ElasticsearchClient elasticsearchClient,
                                EmbeddingProvider embeddingProvider) {
@@ -133,9 +162,15 @@ public class HybridSearchService {
             log.debug("Ending chunks iniettati: {}", endingChunks.size());
         }
 
-        List<SearchResult> merged = reciprocalRankFusion(bm25Results, knnResults, endingChunks, size, applyPositionBoost);
-        log.info("Hybrid RRF: {} risultati finali", merged.size());
-        return merged;
+        List<SearchResult> mergedCandidates = reciprocalRankFusion(
+            bm25Results, knnResults, endingChunks, candidateSize, applyPositionBoost);
+
+        List<SearchResult> finalResults = rerankEnabled
+            ? rerankSecondStage(queryText, mergedCandidates, size)
+            : mergedCandidates.stream().limit(size).toList();
+
+        log.info("Hybrid search finale: {} risultati (rerank={})", finalResults.size(), rerankEnabled);
+        return finalResults;
     }
 
     /**
@@ -275,7 +310,7 @@ public class HybridSearchService {
             }
         }
 
-        // Ordina per RRF score decrescente e prendi i top-K
+        // Ordina per RRF score decrescente e prendi i top-K candidati
         return rrfScores.entrySet().stream()
                 .sorted(Map.Entry.<String, Double>comparingByValue(Comparator.reverseOrder()))
                 .limit(topK)
@@ -285,6 +320,111 @@ public class HybridSearchService {
                     return r;
                 })
                 .toList();
+    }
+
+    /**
+     * Secondo stadio di reranking sopra i candidati prodotti da RRF.
+     *
+     * <p>Usa tre segnali leggeri e stabili:
+     * <ul>
+     *   <li>score RRF normalizzato</li>
+     *   <li>overlap tra termini significativi della query e del contenuto</li>
+     *   <li>match dei termini nel titolo del capitolo o nel nome file</li>
+     * </ul>
+     *
+     * <p>L'obiettivo non è sostituire un cross-encoder, ma ripulire il top-K finale
+     * premiando i chunk che allineano meglio segnali semantici e lessicali.
+     */
+    private List<SearchResult> rerankSecondStage(String queryText, List<SearchResult> candidates, int topK) {
+        if (candidates.isEmpty()) {
+            return candidates;
+        }
+
+        int effectiveWindow = Math.max(topK, Math.min(rerankWindow, candidates.size()));
+        List<SearchResult> window = candidates.stream().limit(effectiveWindow).toList();
+        Set<String> queryTerms = tokenizeForRerank(queryText);
+        float maxOriginalScore = window.stream()
+                .map(SearchResult::getScore)
+                .filter(score -> score != null)
+                .max(Float::compare)
+                .orElse(1.0f);
+
+        List<SearchResult> reranked = new ArrayList<>(window.size());
+        for (SearchResult candidate : window) {
+            double normalizedRrf = maxOriginalScore > 0f && candidate.getScore() != null
+                    ? candidate.getScore() / maxOriginalScore
+                    : 0.0;
+            double contentOverlap = computeOverlap(queryTerms, candidate.getContent());
+            double titleMatch = Math.max(
+                    computeOverlap(queryTerms, candidate.getChapterTitle()),
+                    computeOverlap(queryTerms, candidate.getFileName())
+            );
+            boolean exactPhrase = containsNormalized(candidate.getContent(), queryText)
+                    || containsNormalized(candidate.getChapterTitle(), queryText);
+            double exactPhraseBoost = exactPhrase ? 0.05 : 0.0;
+
+            double finalScore = (normalizedRrf * rerankRrfWeight)
+                    + (contentOverlap * rerankTermOverlapWeight)
+                    + (titleMatch * rerankTitleMatchWeight)
+                    + exactPhraseBoost;
+
+            candidate.setExplanation(String.format(
+                    "rerank(rrf=%.3f, overlap=%.3f, title=%.3f, exact=%s)",
+                    normalizedRrf, contentOverlap, titleMatch, exactPhrase));
+            candidate.setScore((float) finalScore);
+            reranked.add(candidate);
+        }
+
+        reranked.sort(Comparator
+                .comparing(SearchResult::getScore, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(result -> result.getChunkIndex() != null ? result.getChunkIndex() : Integer.MAX_VALUE));
+
+        if (log.isDebugEnabled()) {
+            log.debug("Second-stage rerank applicato: window={}, queryTerms={}", effectiveWindow, queryTerms);
+            for (int i = 0; i < Math.min(topK, reranked.size()); i++) {
+                SearchResult result = reranked.get(i);
+                log.debug("   [rerank {}] score={} doc='{}' sez='{}' explain={}",
+                        i + 1,
+                        result.getScore() != null ? String.format("%.4f", result.getScore()) : "n/a",
+                        result.getFileName(),
+                        result.getChapterTitle(),
+                        result.getExplanation());
+            }
+        }
+
+        return reranked.stream().limit(topK).toList();
+    }
+
+    private Set<String> tokenizeForRerank(String text) {
+        if (text == null || text.isBlank()) {
+            return Set.of();
+        }
+        return Arrays.stream(text.toLowerCase().split("\\s+"))
+                .map(token -> token.replaceAll("[^\\p{L}\\p{Nd}]", ""))
+                .filter(token -> token.length() >= 3)
+                .filter(token -> !RERANK_STOP_WORDS.contains(token))
+                .collect(Collectors.toCollection(HashSet::new));
+    }
+
+    private double computeOverlap(Set<String> queryTerms, String text) {
+        if (queryTerms.isEmpty() || text == null || text.isBlank()) {
+            return 0.0;
+        }
+        Set<String> candidateTerms = tokenizeForRerank(text);
+        if (candidateTerms.isEmpty()) {
+            return 0.0;
+        }
+        long matches = queryTerms.stream().filter(candidateTerms::contains).count();
+        return (double) matches / queryTerms.size();
+    }
+
+    private boolean containsNormalized(String text, String query) {
+        if (text == null || text.isBlank() || query == null || query.isBlank()) {
+            return false;
+        }
+        String normalizedText = text.toLowerCase().replaceAll("\\s+", " ");
+        String normalizedQuery = query.toLowerCase().trim().replaceAll("\\s+", " ");
+        return normalizedQuery.length() >= 6 && normalizedText.contains(normalizedQuery);
     }
 
     /**
@@ -373,6 +513,19 @@ public class HybridSearchService {
      * @return fileName esatto se trovato, altrimenti {@code Optional.empty()}
      */
     public Optional<String> resolveFileName(String hint) {
+        if (hint == null || hint.isBlank()) {
+            return Optional.empty();
+        }
+
+        String trimmedHint = hint.trim();
+        Optional<String> indexedMatch = listDocuments().stream()
+            .max(Comparator.comparingInt(candidate -> scoreFileNameCandidate(trimmedHint, candidate)));
+
+        if (indexedMatch.isPresent() && scoreFileNameCandidate(trimmedHint, indexedMatch.get()) > 0) {
+            log.debug("Risolto fileName via indice locale: hint='{}' -> '{}'", trimmedHint, indexedMatch.get());
+            return indexedMatch;
+        }
+
         try {
             var response = elasticsearchClient.search(s -> s
                     .index(semanticIndex)
@@ -380,7 +533,7 @@ public class HybridSearchService {
                     .source(src -> src.filter(f -> f.includes("fileName")))
                     .query(q -> q.match(m -> m
                             .field("fileName")
-                            .query(hint)
+                    .query(trimmedHint)
                             .fuzziness("AUTO"))),
                     SemanticChunk.class);
 
@@ -392,6 +545,64 @@ public class HybridSearchService {
             log.warn("Risoluzione fileName fallita per hint='{}': {}", hint, e.getMessage());
             return Optional.empty();
         }
+    }
+
+    private int scoreFileNameCandidate(String hint, String candidate) {
+        if (candidate == null || candidate.isBlank()) {
+            return 0;
+        }
+        if (candidate.equalsIgnoreCase(hint)) {
+            return 1_000;
+        }
+
+        String normalizedHint = normalizeFileNameHint(hint);
+        String normalizedCandidate = normalizeFileNameHint(candidate);
+        String normalizedHintBase = removePdfSuffix(normalizedHint);
+        String normalizedCandidateBase = removePdfSuffix(normalizedCandidate);
+
+        if (normalizedHint.isBlank() || normalizedCandidate.isBlank()) {
+            return 0;
+        }
+        if (normalizedCandidate.equals(normalizedHint)) {
+            return 950;
+        }
+        if (normalizedCandidateBase.equals(normalizedHintBase)) {
+            return 925;
+        }
+        if (normalizedCandidate.contains(normalizedHint) || normalizedCandidateBase.contains(normalizedHintBase)) {
+            return 850;
+        }
+        if (normalizedHint.contains(normalizedCandidate) || normalizedHintBase.contains(normalizedCandidateBase)) {
+            return 700;
+        }
+
+        Set<String> hintTokens = Arrays.stream(normalizedHintBase.split(" "))
+                .filter(token -> !token.isBlank())
+                .collect(Collectors.toSet());
+        Set<String> candidateTokens = Arrays.stream(normalizedCandidateBase.split(" "))
+                .filter(token -> !token.isBlank())
+                .collect(Collectors.toSet());
+        if (hintTokens.isEmpty() || candidateTokens.isEmpty()) {
+            return 0;
+        }
+
+        long overlap = hintTokens.stream().filter(candidateTokens::contains).count();
+        if (overlap == 0) {
+            return 0;
+        }
+        return 500 + (int) (overlap * 100);
+    }
+
+    private String normalizeFileNameHint(String value) {
+        return value.toLowerCase()
+                .replaceAll("\\.[a-z0-9]{2,5}$", "")
+                .replaceAll("[^\\p{L}\\p{Nd}]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
+    private String removePdfSuffix(String value) {
+        return value.replaceAll("\\bpdf$", "").trim();
     }
 
     // ── Conversione risposta ES → SearchResult ────────────────────────────────

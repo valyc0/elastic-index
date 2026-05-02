@@ -18,6 +18,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -80,6 +81,17 @@ public class RagService {
     private static final String LANGUAGE_INSTRUCTION =
             "5. Rispondi nella lingua: %s.";
 
+        private static final String GROUNDING_INSTRUCTION =
+            "6. Se il contesto è sufficiente, cita almeno una fonte nel formato [FONTE N]. "
+                + "Se non puoi citare fonti pertinenti, dichiara che l'evidenza documentale è insufficiente.";
+
+        private static final String INSUFFICIENT_EVIDENCE_MESSAGE =
+            "Non ho trovato evidenza documentale sufficiente per rispondere in modo affidabile. "
+                + "Prova a riformulare la domanda o a restringerla al documento o alla sezione corretti.";
+
+        private static final Pattern SOURCE_CITATION_PATTERN =
+            Pattern.compile("\\[FONTE\\s+\\d+\\]", Pattern.CASE_INSENSITIVE);
+
     /** Frasi che indicano che l'LLM non ha trovato informazioni nel contesto. */
     private static final List<String> NO_INFO_SIGNALS = List.of(
             "non ho trovato", "nessuna informazione", "non sono presenti",
@@ -91,6 +103,7 @@ public class RagService {
     private final LlmProvider llmProvider;
     private final EmbeddingProvider embeddingProvider;
     private final ConversationSessionService sessionService;
+    private final TokenBudgetService tokenBudgetService;
 
     @Value("${rag.context.max-tokens:3000}")
     private int maxContextTokens;
@@ -98,14 +111,31 @@ public class RagService {
     @Value("${rag.context.top-k:5}")
     private int defaultTopK;
 
+    @Value("${rag.grounding.min-score:0.15}")
+    private float minGroundingScore;
+
+    @Value("${rag.grounding.min-sources:2}")
+    private int minGroundingSources;
+
+    @Value("${rag.grounding.require-citations:true}")
+    private boolean requireCitations;
+
+    @Value("${rag.grounding.auto-append-citations:true}")
+    private boolean autoAppendCitations;
+
+    @Value("${rag.grounding.auto-append.max-sources:2}")
+    private int autoAppendCitationCount;
+
     public RagService(HybridSearchService hybridSearchService,
                       LlmProvider llmProvider,
                       EmbeddingProvider embeddingProvider,
-                      ConversationSessionService sessionService) {
+                      ConversationSessionService sessionService,
+                      TokenBudgetService tokenBudgetService) {
         this.hybridSearchService = hybridSearchService;
         this.llmProvider = llmProvider;
         this.embeddingProvider = embeddingProvider;
         this.sessionService = sessionService;
+        this.tokenBudgetService = tokenBudgetService;
     }
 
     /**
@@ -143,10 +173,25 @@ public class RagService {
         List<SearchResult> retrieved = hybridSearchService.search(
                 query, topK, filter.isEmpty() ? null : filter);
 
+        boolean retrievalExpanded = false;
+        RetrievalEvidence evidence = assessEvidence(retrieved);
+
+        if (!evidence.sufficient()) {
+            String expandedQuery = expandQuery(query);
+            if (!expandedQuery.equalsIgnoreCase(query.trim())) {
+            retrievalExpanded = true;
+            log.info("▶ GROUNDING : evidenza debole → retry retrieval con query espansa: '{}'", expandedQuery);
+            retrieved = hybridSearchService.search(
+                expandedQuery, topK, filter.isEmpty() ? null : filter);
+            evidence = assessEvidence(retrieved);
+            }
+        }
+
         float bestScore = retrieved.isEmpty() ? 0f
                 : (retrieved.get(0).getScore() != null ? retrieved.get(0).getScore() : 0f);
 
-        log.info("▶ RETRIEVAL : {} chunk trovati  |  best score: {}", retrieved.size(), bestScore);
+        log.info("▶ RETRIEVAL : {} chunk trovati  |  best score: {}  |  sufficient={}",
+            retrieved.size(), bestScore, evidence.sufficient());
         if (!retrieved.isEmpty()) {
             log.debug("▶ CHUNK RECUPERATI:");
             for (int i = 0; i < retrieved.size(); i++) {
@@ -159,7 +204,13 @@ public class RagService {
                         truncate(r.getContent(), 100));
             }
         }
-        log.info("▶ DECISIONE : delegata all'LLM (valuta autonomamente se il contesto è sufficiente)");
+
+        if (!evidence.sufficient()) {
+            log.info("▶ GROUNDING : evidenza insufficiente, salto la chiamata LLM");
+            return buildGroundingFallbackAnswer(query, sessionId, start);
+        }
+
+        log.info("▶ DECISIONE : retrieval sufficiente, procedo alla chiamata LLM con grounding stricter");
 
         // 2. Context building: passa sempre i chunk all'LLM, anche se score basso
         String context = buildContext(retrieved);
@@ -173,9 +224,13 @@ public class RagService {
         List<ChatMessage> messages = buildMessages(systemPrompt, userMessage, history);
 
         // 4. Chiamata LLM — decide autonomamente se rispondere o chiedere chiarimenti
-        log.info("▶ LLM CALL  : modello='{}' | contesto~{} parole | {} chunk | {} msg totali",
+        int contextTokens = tokenBudgetService.estimateTextTokens(context, llmProvider.modelName());
+        int messageTokens = tokenBudgetService.estimateMessagesTokens(messages, llmProvider.modelName());
+
+        log.info("▶ LLM CALL  : modello='{}' | contesto~{} token | prompt~{} token | {} chunk | {} msg totali",
                 llmProvider.modelName(),
-                context.isBlank() ? 0 : context.split("\\s+").length,
+            contextTokens,
+            messageTokens,
                 retrieved.size(),
                 messages.size());
 
@@ -185,22 +240,25 @@ public class RagService {
 
         // 5. Parsing robusto: gestisce risposte malformate dei modelli piccoli
         ParsedResponse parsed = parseResponse(rawResponse);
+        parsed = enforceGroundingRules(parsed, retrieved);
 
         // 6. Se il contesto non era sufficiente, riprova con query espansa (una sola volta)
-        if (parsed.needsClarification) {
+        if (parsed.needsClarification && !retrievalExpanded) {
             String expandedQuery = expandQuery(query);
             if (!expandedQuery.equalsIgnoreCase(query.trim())) {
                 log.info("▶ RETRY     : contesto insufficiente → query espansa: '{}'", expandedQuery);
                 List<SearchResult> retrieved2 = hybridSearchService.search(
                         expandedQuery, topK, filter.isEmpty() ? null : filter);
                 log.info("▶ RETRY     : {} chunk trovati con query espansa", retrieved2.size());
-                if (!retrieved2.isEmpty()) {
+                RetrievalEvidence retryEvidence = assessEvidence(retrieved2);
+                if (retryEvidence.sufficient()) {
                     String context2 = buildContext(retrieved2);
                     String userMessage2 = buildUserMessage(query, context2);
                     List<ChatMessage> messages2 = buildMessages(systemPrompt, userMessage2, history);
                     String rawResponse2 = llmProvider.complete(messages2);
                     log.debug("▶ RETRY LLM risposta ({} chars):\n{}", rawResponse2.length(), rawResponse2);
                     ParsedResponse parsed2 = parseResponse(rawResponse2);
+                    parsed2 = enforceGroundingRules(parsed2, retrieved2);
                     if (!parsed2.needsClarification) {
                         parsed = parsed2;
                         retrieved = retrieved2;
@@ -245,30 +303,38 @@ public class RagService {
 
     private String buildContext(List<SearchResult> chunks) {
         StringBuilder sb = new StringBuilder();
-        int totalWords = 0;
+        int totalTokens = 0;
+        String modelName = llmProvider.modelName();
 
         for (int i = 0; i < chunks.size(); i++) {
             SearchResult chunk = chunks.get(i);
             String chunkText = chunk.getContent();
-            int words = chunkText.split("\\s+").length;
+            String sourceBlock = formatSourceBlock(i + 1, chunk, chunkText);
+            int blockTokens = tokenBudgetService.estimateTextTokens(sourceBlock, modelName);
 
-            if (totalWords + words > maxContextTokens) {
-                log.debug("Contesto troncato a {} chunk per rispettare token window", i);
+            if (totalTokens + blockTokens > maxContextTokens) {
+                log.debug("Contesto troncato a {} chunk per rispettare token window ({} token)", i, maxContextTokens);
                 break;
             }
 
-            sb.append("[FONTE ").append(i + 1).append("]");
-            if (chunk.getFileName() != null) {
-                sb.append(" Documento: ").append(chunk.getFileName());
-            }
-            if (chunk.getChapterTitle() != null && !chunk.getChapterTitle().isBlank()) {
-                sb.append(" | Sezione: ").append(chunk.getChapterTitle());
-            }
-            sb.append("\n").append(chunkText).append("\n\n");
-            totalWords += words;
+            sb.append(sourceBlock).append("\n\n");
+            totalTokens += blockTokens;
         }
 
         return sb.toString().trim();
+    }
+
+    private String formatSourceBlock(int sourceNumber, SearchResult chunk, String chunkText) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("[FONTE ").append(sourceNumber).append("]");
+        if (chunk.getFileName() != null) {
+            sb.append(" Documento: ").append(chunk.getFileName());
+        }
+        if (chunk.getChapterTitle() != null && !chunk.getChapterTitle().isBlank()) {
+            sb.append(" | Sezione: ").append(chunk.getChapterTitle());
+        }
+        sb.append("\n").append(chunkText);
+        return sb.toString();
     }
 
     private String buildUserMessage(String query, String context) {
@@ -285,10 +351,17 @@ public class RagService {
     }
 
     private String buildSystemPrompt(String language) {
-        String langInstruction = (language != null && !language.isBlank())
-                ? LANGUAGE_INSTRUCTION.formatted(language)
-                : "";
-        return SYSTEM_PROMPT_TEMPLATE.formatted(langInstruction);
+        List<String> instructions = new ArrayList<>();
+        if (language != null && !language.isBlank()) {
+            instructions.add(LANGUAGE_INSTRUCTION.formatted(language));
+        }
+        if (requireCitations) {
+            instructions.add(GROUNDING_INSTRUCTION);
+        }
+        String extraInstructions = instructions.isEmpty()
+                ? ""
+                : String.join("\n", instructions);
+        return SYSTEM_PROMPT_TEMPLATE.formatted(extraInstructions);
     }
 
     // ── Conversation history ───────────────────────────────────────────────────
@@ -378,7 +451,70 @@ public class RagService {
 
     private record ParsedResponse(String mainAnswer, boolean needsClarification) {}
 
+    private record RetrievalEvidence(float bestScore, int sourceCount, boolean sufficient) {}
+
     // ── Utilities ──────────────────────────────────────────────────────────────
+
+    private RetrievalEvidence assessEvidence(List<SearchResult> retrieved) {
+        float bestScore = retrieved.isEmpty() ? 0f
+                : (retrieved.get(0).getScore() != null ? retrieved.get(0).getScore() : 0f);
+        int nonEmptySources = (int) retrieved.stream()
+                .filter(result -> result.getContent() != null && !result.getContent().isBlank())
+                .count();
+        boolean sufficient = bestScore >= minGroundingScore && nonEmptySources >= minGroundingSources;
+        log.debug("▶ GROUNDING : bestScore={} sourceCount={} thresholds(score>={}, sources>={})",
+                bestScore, nonEmptySources, minGroundingScore, minGroundingSources);
+        return new RetrievalEvidence(bestScore, nonEmptySources, sufficient);
+    }
+
+    private ParsedResponse enforceGroundingRules(ParsedResponse parsed, List<SearchResult> retrieved) {
+        if (parsed.needsClarification || !requireCitations) {
+            return parsed;
+        }
+        boolean hasCitation = parsed.mainAnswer != null
+                && SOURCE_CITATION_PATTERN.matcher(parsed.mainAnswer).find();
+        if (!hasCitation && !retrieved.isEmpty()) {
+            if (autoAppendCitations) {
+                String citationSuffix = buildCitationSuffix(retrieved);
+                if (!citationSuffix.isBlank()) {
+                    log.info("▶ GROUNDING : risposta senza citazioni, aggiungo automaticamente {}", citationSuffix);
+                    return new ParsedResponse(parsed.mainAnswer.strip() + "\n\nFonti: " + citationSuffix, false);
+                }
+            }
+            log.warn("▶ GROUNDING : risposta senza citazioni e senza fonti inferibili, la tratto come evidenza insufficiente");
+            return new ParsedResponse(INSUFFICIENT_EVIDENCE_MESSAGE, true);
+        }
+        return parsed;
+    }
+
+    private String buildCitationSuffix(List<SearchResult> retrieved) {
+        int limit = Math.max(1, autoAppendCitationCount);
+        List<String> citations = new ArrayList<>();
+        for (int i = 0; i < retrieved.size() && i < limit; i++) {
+            citations.add("[FONTE " + (i + 1) + "]");
+        }
+        return String.join(" ", citations);
+    }
+
+    private RagAnswer buildGroundingFallbackAnswer(String query, String sessionId, long start) {
+        long elapsed = System.currentTimeMillis() - start;
+        sessionService.addTurn(sessionId, query, INSUFFICIENT_EVIDENCE_MESSAGE);
+        RagAnswer answer = new RagAnswer(
+                INSUFFICIENT_EVIDENCE_MESSAGE,
+                List.of(),
+                llmProvider.modelName(),
+                embeddingProvider.modelName(),
+                query,
+                elapsed);
+        answer.setFollowUpQuestions(List.of());
+        answer.setNeedsClarification(true);
+        answer.setSessionId(sessionId);
+        return answer;
+    }
+
+    public Map<String, String> resolveFilter(RagRequest request) {
+        return Map.copyOf(buildFilter(request));
+    }
 
     private Map<String, String> buildFilter(RagRequest request) {
         Map<String, String> filter = new HashMap<>();
