@@ -1,0 +1,21 @@
+server:
+  port: 8093
+
+spring:
+  application:
+    name: rag-client-web
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+
+# RAG Backend API Configuration
+rag:
+  api:
+    base-url: http://localhost:8080
+    timeout: 60000  # 60 seconds
+
+# Vaadin Configuration
+vaadin:
+  launch-browser: false
+  productionMode: false
