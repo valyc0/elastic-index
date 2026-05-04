@@ -1,11 +1,12 @@
 package io.bootify.my_app.rest;
 
-import io.bootify.my_app.model.DocumentExtractionResult;
+import io.bootify.my_app.model.DoclingJobStatus;
 import io.bootify.my_app.model.RagAnswer;
 import io.bootify.my_app.model.RagRequest;
 import io.bootify.my_app.model.SearchResult;
 import io.bootify.my_app.service.DoclingClient;
 import io.bootify.my_app.service.DoclingException;
+import io.bootify.my_app.service.DoclingJobService;
 import io.bootify.my_app.service.RagService;
 import io.bootify.my_app.service.SemanticIndexService;
 import org.slf4j.Logger;
@@ -18,7 +19,6 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * Controller per la pipeline Docling-RAG.
@@ -49,25 +49,30 @@ public class DoclingController {
     private final DoclingClient doclingClient;
     private final SemanticIndexService semanticIndexService;
     private final RagService ragService;
+    private final DoclingJobService doclingJobService;
 
     public DoclingController(DoclingClient doclingClient,
                               SemanticIndexService semanticIndexService,
-                              RagService ragService) {
+                              RagService ragService,
+                              DoclingJobService doclingJobService) {
         this.doclingClient = doclingClient;
         this.semanticIndexService = semanticIndexService;
         this.ragService = ragService;
+        this.doclingJobService = doclingJobService;
     }
 
     /**
-     * Parsing strutturato con Docling + indicizzazione semantica.
-     *
-     * <p>Accetta: PDF, DOCX, HTML, PPTX, XLSX, Markdown, AsciiDoc
+     * Avvia il parsing strutturato con Docling + indicizzazione semantica in modalità asincrona.
+     * Restituisce immediatamente un jobId; l'elaborazione avviene in background.
      *
      * <pre>
      * POST /api/docling/index
      * Content-Type: multipart/form-data
      * file: &lt;binary&gt;
      * </pre>
+     *
+     * <p>Risposta 202: {@code {jobId, status: "QUEUED", fileName}}
+     * <p>Monitorare con: {@code GET /api/docling/jobs/{jobId}}
      */
     @PostMapping(value = "/index", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<Map<String, Object>> indexDocument(
@@ -78,30 +83,17 @@ public class DoclingController {
                     .body(Map.of("error", "File vuoto"));
         }
 
-        log.info("Docling index: file={}, size={} bytes",
+        log.info("Docling index async: file={}, size={} bytes",
                 file.getOriginalFilename(), file.getSize());
 
         try {
-            // 1. Parsing strutturato con Docling
-            DocumentExtractionResult extracted = doclingClient.parse(file);
+            String jobId = doclingJobService.submitJob(file);
 
-            // 2. Indicizzazione semantica (chunking + embedding + ES)
-            String documentId = UUID.randomUUID().toString();
-            int chunks = semanticIndexService.indexDocument(documentId, extracted);
-
-            int sectionCount = extracted.getChapters() != null
-                    ? extracted.getChapters().size() : 0;
-
-            log.info("Docling index completato: documentId={}, sezioni={}, chunks={}",
-                    documentId, sectionCount, chunks);
-
-            return ResponseEntity.ok(Map.of(
-                    "documentId", documentId,
-                    "fileName", extracted.getFileName(),
-                    "sections", sectionCount,
-                    "chunks", chunks,
-                    "parser", "docling",
-                    "message", "Documento indicizzato con Docling"
+            return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of(
+                    "jobId", jobId,
+                    "status", "QUEUED",
+                    "fileName", file.getOriginalFilename() != null ? file.getOriginalFilename() : "document",
+                    "message", "Elaborazione avviata. Controlla lo stato con GET /api/docling/jobs/" + jobId
             ));
 
         } catch (DoclingException e) {
@@ -116,6 +108,34 @@ public class DoclingController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("error", e.getMessage()));
         }
+    }
+
+    /**
+     * Restituisce lo stato di un job di indicizzazione.
+     *
+     * <pre>
+     * GET /api/docling/jobs/{jobId}
+     * </pre>
+     */
+    @GetMapping("/jobs/{jobId}")
+    public ResponseEntity<DoclingJobStatus> getJobStatus(@PathVariable String jobId) {
+        DoclingJobStatus job = doclingJobService.getJob(jobId);
+        if (job == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(job);
+    }
+
+    /**
+     * Elenca tutti i job di indicizzazione in memoria.
+     *
+     * <pre>
+     * GET /api/docling/jobs
+     * </pre>
+     */
+    @GetMapping("/jobs")
+    public ResponseEntity<List<DoclingJobStatus>> listJobs() {
+        return ResponseEntity.ok(doclingJobService.listJobs());
     }
 
     /**

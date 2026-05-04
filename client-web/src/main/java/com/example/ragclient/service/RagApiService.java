@@ -25,7 +25,7 @@ public class RagApiService {
     // ============ DOCUMENT ENDPOINTS ============
 
     /**
-     * Upload a document to the RAG system
+     * Upload a document to the RAG system (async: returns immediately with jobId)
      */
     public UploadResponse uploadDocument(String filename, byte[] content) {
         log.info("📤 Uploading document: {}", filename);
@@ -44,6 +44,18 @@ public class RagApiService {
                 .body(BodyInserters.fromMultipartData(builder.build()))
                 .retrieve()
                 .bodyToMono(UploadResponse.class)
+                .block();
+    }
+
+    /**
+     * Get the status of an async Docling indexing job
+     */
+    public DoclingJobStatusResponse getDoclingJobStatus(String jobId) {
+        log.debug("🔍 Polling job status: {}", jobId);
+        return webClient.get()
+                .uri("/api/docling/jobs/{jobId}", jobId)
+                .retrieve()
+                .bodyToMono(DoclingJobStatusResponse.class)
                 .block();
     }
 

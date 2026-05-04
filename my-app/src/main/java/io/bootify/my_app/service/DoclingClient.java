@@ -3,6 +3,7 @@ package io.bootify.my_app.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.bootify.my_app.model.ChapterSection;
 import io.bootify.my_app.model.DoclingParseResponse;
+import io.bootify.my_app.model.DoclingPythonJobStatus;
 import io.bootify.my_app.model.DoclingParseResponse.DoclingSection;
 import io.bootify.my_app.model.DoclingParseResponse.DoclingTable;
 import io.bootify.my_app.model.DocumentExtractionResult;
@@ -116,6 +117,113 @@ public class DoclingClient {
         } catch (Exception e) {
             throw new DoclingException("Errore durante il parsing Docling: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Invia il file a Docling in modalità asincrona.
+     * Il servizio Python avvia l'elaborazione in background e restituisce subito un jobId.
+     *
+     * @param file file da elaborare
+     * @return jobId Python da usare per monitorare lo stato con {@link #getPythonJobStatus}
+     * @throws DoclingException se il servizio non è raggiungibile
+     */
+    public String submitParseAsync(MultipartFile file) {
+        log.info("Docling submitParseAsync: file={}, size={} bytes",
+                file.getOriginalFilename(), file.getSize());
+        try {
+            byte[] fileBytes = file.getBytes();
+            String fileName = file.getOriginalFilename() != null
+                    ? file.getOriginalFilename() : "document";
+            String boundary = UUID.randomUUID().toString().replace("-", "");
+
+            byte[] body = buildMultipartBody(boundary, fileName, fileBytes, file.getContentType());
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(doclingUrl + "/parse/async"))
+                    .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                    .timeout(Duration.ofSeconds(30))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request,
+                    HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() != 202 && response.statusCode() != 200) {
+                throw new DoclingException(
+                        "Docling async submission error HTTP " + response.statusCode()
+                        + ": " + response.body());
+            }
+
+            @SuppressWarnings("unchecked")
+            java.util.Map<String, Object> parsed = objectMapper.readValue(
+                    response.body(), java.util.Map.class);
+            String jobId = (String) parsed.get("jobId");
+            if (jobId == null) {
+                throw new DoclingException(
+                        "Python non ha restituito un jobId: " + response.body());
+            }
+
+            log.info("Docling async submission OK: pythonJobId={}, file={}", jobId, fileName);
+            return jobId;
+
+        } catch (DoclingException e) {
+            throw e;
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new DoclingException(
+                    "Impossibile raggiungere Docling su " + doclingUrl + " per invio async", e);
+        } catch (Exception e) {
+            throw new DoclingException(
+                    "Errore durante la submission async: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Recupera lo stato di un job di parsing Python.
+     *
+     * @param pythonJobId jobId restituito da {@link #submitParseAsync}
+     * @return stato del job con eventuale risultato se DONE
+     * @throws DoclingException se il job non esiste o si verifica un errore di rete
+     */
+    public DoclingPythonJobStatus getPythonJobStatus(String pythonJobId) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(doclingUrl + "/jobs/" + pythonJobId))
+                    .GET()
+                    .timeout(Duration.ofSeconds(10))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request,
+                    HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() == 404) {
+                throw new DoclingException("Job Python non trovato: " + pythonJobId);
+            }
+            if (response.statusCode() != 200) {
+                throw new DoclingException(
+                        "Errore stato job Python HTTP " + response.statusCode());
+            }
+
+            return objectMapper.readValue(response.body(), DoclingPythonJobStatus.class);
+
+        } catch (DoclingException e) {
+            throw e;
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new DoclingException(
+                    "Errore nel recupero stato job Python " + pythonJobId, e);
+        } catch (Exception e) {
+            throw new DoclingException(
+                    "Errore parsing risposta job Python: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Converte il risultato Python in {@link DocumentExtractionResult}.
+     * Metodo pubblico per uso da {@code DoclingJobService}.
+     */
+    public DocumentExtractionResult convertResult(DoclingParseResponse parsed, String fileName) {
+        return toExtractionResult(parsed, fileName);
     }
 
     /**

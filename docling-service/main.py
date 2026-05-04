@@ -21,7 +21,9 @@ import logging
 import tempfile
 import os
 import functools
+import uuid
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -61,6 +63,11 @@ logger.info(
 # Il semaforo serializza l'accesso garantendo al massimo _MAX_CONCURRENT
 # conversioni attive contemporaneamente.
 _semaphore: asyncio.Semaphore  # inizializzato in startup
+
+# ── Job store in-memory ───────────────────────────────────────────────────────
+# Mantiene lo stato dei job asincroni per 5 ore dopo il completamento.
+_jobs: dict = {}
+_JOB_TTL_HOURS = 5
 
 
 def _make_converter() -> DocumentConverter:
@@ -184,6 +191,7 @@ async def startup():
         initializer=_worker_init,
     )
     logger.info("ProcessPoolExecutor avviato con %d worker(s)", _MAX_CONCURRENT)
+    asyncio.create_task(_cleanup_old_jobs())
 
 
 @app.on_event("shutdown")
@@ -305,3 +313,174 @@ def _get_page(item) -> Optional[int]:
     except Exception:
         pass
     return None
+
+
+# ── Job store: cleanup periodico ─────────────────────────────────────────────
+
+async def _cleanup_old_jobs():
+    """Rimuove i job più vecchi di _JOB_TTL_HOURS ogni ora."""
+    while True:
+        await asyncio.sleep(3600)
+        cutoff = datetime.utcnow() - timedelta(hours=_JOB_TTL_HOURS)
+        expired = [jid for jid, j in list(_jobs.items()) if j["created_at"] < cutoff]
+        for jid in expired:
+            _jobs.pop(jid, None)
+        if expired:
+            logger.info("Rimossi %d job scaduti (TTL=%dh)", len(expired), _JOB_TTL_HOURS)
+
+
+# ── Background worker per job asincroni ──────────────────────────────────────
+
+async def _process_document_async(job_id: str, filename: str, content: bytes, suffix: str):
+    """Elabora il documento in background e aggiorna lo stato nel job store."""
+    _jobs[job_id]["status"] = "PROCESSING"
+    _jobs[job_id]["updated_at"] = datetime.utcnow()
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        async with _semaphore:
+            loop = asyncio.get_running_loop()
+            try:
+                raw = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _worker_pool,
+                        functools.partial(_convert_in_worker, tmp_path),
+                    ),
+                    timeout=_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                _jobs[job_id]["status"] = "ERROR"
+                _jobs[job_id]["error"] = f"Timeout: conversione superato {_TIMEOUT_SEC}s"
+                _jobs[job_id]["updated_at"] = datetime.utcnow()
+                return
+
+        result = ParseResponse(
+            file_name=filename,
+            full_text=raw["full_text"],
+            sections=[ParsedSection(**s) for s in raw["sections"]],
+            tables=[ParsedTable(**t) for t in raw["tables"]],
+            metadata={"fileName": filename, **raw["metadata"]},
+            page_count=raw["page_count"],
+        )
+
+        _jobs[job_id]["status"] = "DONE"
+        _jobs[job_id]["result"] = result.model_dump()
+        _jobs[job_id]["updated_at"] = datetime.utcnow()
+
+        logger.info(
+            "Job %s completato: %s | sezioni=%d, tabelle=%d",
+            job_id, filename, len(raw["sections"]), len(raw["tables"]),
+        )
+
+    except Exception as e:
+        logger.exception("Errore nel job async %s (%s)", job_id, filename)
+        _jobs[job_id]["status"] = "ERROR"
+        _jobs[job_id]["error"] = str(e)
+        _jobs[job_id]["updated_at"] = datetime.utcnow()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+# ── Nuovi endpoint asincroni ──────────────────────────────────────────────────
+
+class AsyncJobResponse(BaseModel):
+    jobId: str
+    status: str
+    fileName: str
+
+
+class JobStatusResponse(BaseModel):
+    jobId: str
+    fileName: str
+    status: str
+    error: Optional[str] = None
+    result: Optional[ParseResponse] = None
+
+
+@app.post("/parse/async", status_code=202, response_model=AsyncJobResponse)
+async def parse_document_async(file: UploadFile = File(...)):
+    """
+    Avvia il parsing asincrono di un documento.
+    Restituisce immediatamente un jobId; il parsing avviene in background.
+    Controlla lo stato con GET /jobs/{jobId}.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Nome file mancante")
+
+    suffix = Path(file.filename).suffix.lower()
+    allowed = {".pdf", ".docx", ".doc", ".html", ".htm", ".pptx", ".xlsx", ".md", ".adoc"}
+    if suffix not in allowed:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Formato non supportato: {suffix}. Supportati: {allowed}",
+        )
+
+    content = await file.read()
+
+    max_bytes = _MAX_FILE_MB * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File troppo grande: {len(content) // (1024*1024)}MB (max {_MAX_FILE_MB}MB)",
+        )
+
+    job_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    _jobs[job_id] = {
+        "job_id": job_id,
+        "file_name": file.filename,
+        "status": "QUEUED",
+        "created_at": now,
+        "updated_at": now,
+        "error": None,
+        "result": None,
+    }
+
+    asyncio.create_task(_process_document_async(job_id, file.filename, content, suffix))
+
+    logger.info("Job async creato: jobId=%s, file=%s (%.1f MB)",
+                job_id, file.filename, len(content) / (1024 * 1024))
+
+    return AsyncJobResponse(jobId=job_id, status="QUEUED", fileName=file.filename)
+
+
+@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+def get_job_status(job_id: str):
+    """Restituisce lo stato di un job asincrono. Il risultato è incluso solo quando status=DONE."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job non trovato: {job_id}")
+
+    result = None
+    if job["status"] == "DONE" and job["result"]:
+        result = ParseResponse(**job["result"])
+
+    return JobStatusResponse(
+        jobId=job["job_id"],
+        fileName=job["file_name"],
+        status=job["status"],
+        error=job["error"],
+        result=result,
+    )
+
+
+@app.get("/jobs")
+def list_jobs():
+    """Elenca tutti i job in memoria (senza risultato, solo stato)."""
+    return [
+        {
+            "jobId": j["job_id"],
+            "fileName": j["file_name"],
+            "status": j["status"],
+            "error": j["error"],
+            "createdAt": j["created_at"].isoformat(),
+            "updatedAt": j["updated_at"].isoformat(),
+        }
+        for j in _jobs.values()
+    ]

@@ -62,7 +62,7 @@ services:
       # Su macchine con poca RAM tenere a 1; aumentare solo con GPU o >32GB RAM
       - DOCLING_MAX_CONCURRENT=${DOCLING_MAX_CONCURRENT:-1}
       # Timeout per singola conversione in secondi
-      - DOCLING_TIMEOUT_SEC=${DOCLING_TIMEOUT_SEC:-300}
+      - DOCLING_TIMEOUT_SEC=${DOCLING_TIMEOUT_SEC:-900}
       # Dimensione massima file in MB
       - DOCLING_MAX_FILE_MB=${DOCLING_MAX_FILE_MB:-100}
       # Dispositivo: cpu, cuda, mps

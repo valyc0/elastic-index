@@ -8,11 +8,14 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class UploadResponse {
-    private String documentId;
+    private String jobId;
+    private String status;
     private String fileName;
+    private String message;
+    private String error;
+    // campi legacy (mantenuti per retrocompatibilità con eventuali risposte sincrone)
+    private String documentId;
     private Integer sections;
     private Integer chunks;
     private String parser;
-    private String message;
-    private String error;
 }
