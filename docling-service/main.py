@@ -17,6 +17,7 @@ Configurazione via variabili d'ambiente:
 """
 
 import asyncio
+import json
 import logging
 import tempfile
 import os
@@ -26,6 +27,8 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+import redis
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydantic import BaseModel
@@ -64,10 +67,47 @@ logger.info(
 # conversioni attive contemporaneamente.
 _semaphore: asyncio.Semaphore  # inizializzato in startup
 
-# ── Job store in-memory ───────────────────────────────────────────────────────
-# Mantiene lo stato dei job asincroni per 5 ore dopo il completamento.
-_jobs: dict = {}
-_JOB_TTL_HOURS = 5
+# ── Job store Redis ──────────────────────────────────────────────────────────
+# I job vengono salvati in Redis con TTL automatico.
+# Fallback a dict in-memory se Redis non è disponibile.
+_REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+_JOB_TTL_SECONDS = 5 * 3600  # 5 ore
+_redis_client: Optional[redis.Redis] = None
+_jobs_fallback: dict = {}  # usato solo se Redis non è raggiungibile
+
+
+def _get_redis() -> Optional[redis.Redis]:
+    """Restituisce il client Redis se disponibile, altrimenti None."""
+    return _redis_client
+
+
+def _job_set(job_id: str, data: dict) -> None:
+    r = _get_redis()
+    if r is not None:
+        r.setex(f"job:{job_id}", _JOB_TTL_SECONDS, json.dumps(data, default=str))
+    else:
+        _jobs_fallback[job_id] = data
+
+
+def _job_get(job_id: str) -> Optional[dict]:
+    r = _get_redis()
+    if r is not None:
+        raw = r.get(f"job:{job_id}")
+        return json.loads(raw) if raw else None
+    return _jobs_fallback.get(job_id)
+
+
+def _job_list() -> list[dict]:
+    r = _get_redis()
+    if r is not None:
+        keys = r.keys("job:*")
+        result = []
+        for key in keys:
+            raw = r.get(key)
+            if raw:
+                result.append(json.loads(raw))
+        return result
+    return list(_jobs_fallback.values())
 
 
 def _make_converter() -> DocumentConverter:
@@ -184,14 +224,20 @@ app = FastAPI(title="Docling Parsing Service", version="1.0.0")
 
 @app.on_event("startup")
 async def startup():
-    global _semaphore, _worker_pool
+    global _semaphore, _worker_pool, _redis_client
     _semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
     _worker_pool = ProcessPoolExecutor(
         max_workers=_MAX_CONCURRENT,
         initializer=_worker_init,
     )
     logger.info("ProcessPoolExecutor avviato con %d worker(s)", _MAX_CONCURRENT)
-    asyncio.create_task(_cleanup_old_jobs())
+    try:
+        _redis_client = redis.Redis.from_url(_REDIS_URL, decode_responses=True, socket_connect_timeout=3)
+        _redis_client.ping()
+        logger.info("Redis connesso: %s", _REDIS_URL)
+    except Exception as e:
+        _redis_client = None
+        logger.warning("Redis non disponibile (%s), uso fallback in-memory", e)
 
 
 @app.on_event("shutdown")
@@ -315,26 +361,14 @@ def _get_page(item) -> Optional[int]:
     return None
 
 
-# ── Job store: cleanup periodico ─────────────────────────────────────────────
-
-async def _cleanup_old_jobs():
-    """Rimuove i job più vecchi di _JOB_TTL_HOURS ogni ora."""
-    while True:
-        await asyncio.sleep(3600)
-        cutoff = datetime.utcnow() - timedelta(hours=_JOB_TTL_HOURS)
-        expired = [jid for jid, j in list(_jobs.items()) if j["created_at"] < cutoff]
-        for jid in expired:
-            _jobs.pop(jid, None)
-        if expired:
-            logger.info("Rimossi %d job scaduti (TTL=%dh)", len(expired), _JOB_TTL_HOURS)
-
-
-# ── Background worker per job asincroni ──────────────────────────────────────
+# ── Background worker per job asincroni ──────────────────────────────────
 
 async def _process_document_async(job_id: str, filename: str, content: bytes, suffix: str):
     """Elabora il documento in background e aggiorna lo stato nel job store."""
-    _jobs[job_id]["status"] = "PROCESSING"
-    _jobs[job_id]["updated_at"] = datetime.utcnow()
+    job = _job_get(job_id) or {}
+    job["status"] = "PROCESSING"
+    job["updated_at"] = datetime.utcnow().isoformat()
+    _job_set(job_id, job)
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(content)
@@ -352,9 +386,11 @@ async def _process_document_async(job_id: str, filename: str, content: bytes, su
                     timeout=_TIMEOUT_SEC,
                 )
             except asyncio.TimeoutError:
-                _jobs[job_id]["status"] = "ERROR"
-                _jobs[job_id]["error"] = f"Timeout: conversione superato {_TIMEOUT_SEC}s"
-                _jobs[job_id]["updated_at"] = datetime.utcnow()
+                job = _job_get(job_id) or {}
+                job["status"] = "ERROR"
+                job["error"] = f"Timeout: conversione superato {_TIMEOUT_SEC}s"
+                job["updated_at"] = datetime.utcnow().isoformat()
+                _job_set(job_id, job)
                 return
 
         result = ParseResponse(
@@ -366,9 +402,11 @@ async def _process_document_async(job_id: str, filename: str, content: bytes, su
             page_count=raw["page_count"],
         )
 
-        _jobs[job_id]["status"] = "DONE"
-        _jobs[job_id]["result"] = result.model_dump()
-        _jobs[job_id]["updated_at"] = datetime.utcnow()
+        job = _job_get(job_id) or {}
+        job["status"] = "DONE"
+        job["result"] = result.model_dump()
+        job["updated_at"] = datetime.utcnow().isoformat()
+        _job_set(job_id, job)
 
         logger.info(
             "Job %s completato: %s | sezioni=%d, tabelle=%d",
@@ -377,9 +415,11 @@ async def _process_document_async(job_id: str, filename: str, content: bytes, su
 
     except Exception as e:
         logger.exception("Errore nel job async %s (%s)", job_id, filename)
-        _jobs[job_id]["status"] = "ERROR"
-        _jobs[job_id]["error"] = str(e)
-        _jobs[job_id]["updated_at"] = datetime.utcnow()
+        job = _job_get(job_id) or {}
+        job["status"] = "ERROR"
+        job["error"] = str(e)
+        job["updated_at"] = datetime.utcnow().isoformat()
+        _job_set(job_id, job)
     finally:
         try:
             os.unlink(tmp_path)
@@ -431,8 +471,8 @@ async def parse_document_async(file: UploadFile = File(...)):
         )
 
     job_id = str(uuid.uuid4())
-    now = datetime.utcnow()
-    _jobs[job_id] = {
+    now = datetime.utcnow().isoformat()
+    _job_set(job_id, {
         "job_id": job_id,
         "file_name": file.filename,
         "status": "QUEUED",
@@ -440,7 +480,7 @@ async def parse_document_async(file: UploadFile = File(...)):
         "updated_at": now,
         "error": None,
         "result": None,
-    }
+    })
 
     asyncio.create_task(_process_document_async(job_id, file.filename, content, suffix))
 
@@ -453,7 +493,7 @@ async def parse_document_async(file: UploadFile = File(...)):
 @app.get("/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job_status(job_id: str):
     """Restituisce lo stato di un job asincrono. Il risultato è incluso solo quando status=DONE."""
-    job = _jobs.get(job_id)
+    job = _job_get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job non trovato: {job_id}")
 
@@ -472,7 +512,7 @@ def get_job_status(job_id: str):
 
 @app.get("/jobs")
 def list_jobs():
-    """Elenca tutti i job in memoria (senza risultato, solo stato)."""
+    """Elenca tutti i job (senza risultato, solo stato)."""
     return [
         {
             "jobId": j["job_id"],
@@ -482,5 +522,5 @@ def list_jobs():
             "createdAt": j["created_at"].isoformat(),
             "updatedAt": j["updated_at"].isoformat(),
         }
-        for j in _jobs.values()
+        for j in _job_list()
     ]

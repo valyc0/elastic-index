@@ -46,6 +46,17 @@ services:
     networks:
       - elastic
 
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - elastic
+    command: redis-server --save 60 1 --loglevel warning
+
   docling-service:
     build:
       context: ./docling-service
@@ -55,7 +66,10 @@ services:
       - "8001:8001"
     networks:
       - elastic
+    depends_on:
+      - redis
     environment:
+      - REDIS_URL=redis://redis:6379
       # Numero di thread CPU per modello (default: tutti i core del container)
       - DOCLING_THREADS=${DOCLING_THREADS:-12}
       # Conversioni simultanee — ogni worker carica i modelli in RAM (~2-3GB ciascuno)
@@ -82,6 +96,8 @@ volumes:
   elasticsearch-data:
     driver: local
   ollama-data:
+    driver: local
+  redis-data:
     driver: local
 
 networks:
