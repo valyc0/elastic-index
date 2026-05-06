@@ -55,7 +55,7 @@ public class MainLayout extends AppLayout {
         SideNavItem uploadItem = new SideNavItem("Upload Document", UploadView.class);
         uploadItem.setPrefixComponent(new Span("📤"));
         
-        SideNavItem documentsItem = new SideNavItem("Documents", DocumentListView.class);
+        SideNavItem documentsItem = new SideNavItem("Documenti", DocumentListView.class);
         documentsItem.setPrefixComponent(new Span("📚"));
         
         SideNavItem statusItem = new SideNavItem("System Status", StatusView.class);

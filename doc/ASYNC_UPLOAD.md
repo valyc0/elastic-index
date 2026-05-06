@@ -77,23 +77,26 @@ return ResponseEntity.status(202).body(Map.of(
 **File:** `my-app/src/main/java/io/bootify/my_app/service/DoclingJobService.java`
 
 È il cuore dell'architettura async. Gestisce:
-- un **`ConcurrentHashMap`** `jobs` con tutti i job in memoria (TTL 5 ore)
+- un **`ConcurrentHashMap`** `jobs` con tutti i job in memoria (TTL 5 ore, solo per lo stato del polling)
 - un **`ExecutorService`** con thread pool cached (`docling-job-worker`)
 - un **`ScheduledExecutorService`** (`docling-job-cleanup`) che rimuove i job scaduti ogni ora
+- usa **`ParsedDocumentService`** per persistere i documenti su H2
 
 #### `submitJob(file)`
 
 ```
-1. Invia il file a Python via POST /parse/async  →  ottiene pythonJobId
-2. Crea DoclingJobStatus con status=QUEUED e lo salva nella mappa
-3. Lancia processJob() in un thread daemon
-4. Restituisce il javaJobId al controller (e quindi al client)
+1. parsedDocumentService.createPending(fileName) → crea record H2 con stato PROCESSING
+2. Invia il file a Python via POST /parse/async  →  ottiene pythonJobId
+   (se fallisce, aggiorna il record H2 a ERROR)
+3. Crea DoclingJobStatus con status=QUEUED e lo salva nella mappa
+4. Lancia processJob(javaJobId, pythonJobId, fileName, pendingDocId) in un thread daemon
+5. Restituisce il javaJobId al controller (e quindi al client)
 ```
 
-Il passo 1 è bloccante ma rapido: Python risponde in pochi millisecondi
+Il passo 2 è bloccante ma rapido: Python risponde in pochi millisecondi
 perché accetta solo il file e avvia l'elaborazione in background suo conto.
 
-#### `processJob(javaJobId, pythonJobId, fileName)` — thread worker
+#### `processJob(javaJobId, pythonJobId, fileName, pendingDocId)` — thread worker
 
 ```
 1. Thread.interrupted()  →  pulisce eventuali flag stale (bug-fix interrupt)
@@ -103,15 +106,48 @@ perché accetta solo il file e avvia l'elaborazione in background suo conto.
      a. Thread.sleep(5000)
      b. GET /jobs/{pythonJobId}  →  DoclingPythonJobStatus
      c. se DONE   → converti risultato, esci dal loop
-     d. se ERROR  → markError, return
+     d. se ERROR  → markError (job + H2 pendingDocId → ERROR), return
      e. altrimenti (QUEUED/PROCESSING) → continua
-5. status = INDEXING
-6. semanticIndexService.indexDocument(documentId, extracted)
-7. status = DONE  →  chunks, sections, message
+5. parsedDocumentService.updateToTranscribed(pendingDocId, extracted)
+     → H2: PROCESSING → TRANSCRIBED (con JSON sezioni salvato)
+6. job status = DONE  →  sections: M
 ```
 
+**Nota:** l'indicizzazione su Elasticsearch NON avviene più automaticamente.
+Viene avviata solo su richiesta esplicita dell'utente tramite
+`POST /api/documents/parsed/{id}/index` (vedi sotto).
+
 In caso di eccezione non catturata, un secondo `Future.get()` monitor
-cattura e logga l'errore e forza lo stato a ERROR (evita job bloccati su QUEUED).
+cattura e logga l'errore e forza lo stato a ERROR sia nel job in-memory
+sia nel record H2 (evita job bloccati su QUEUED/PROCESSING).
+
+---
+
+### 2b. `ParsedDocumentService` — persistenza e lifecycle H2
+
+**File:** `my-app/src/main/java/io/bootify/my_app/service/ParsedDocumentService.java`
+
+Gestisce il ciclo di vita completo dei documenti su H2:
+
+| Metodo | Descrizione |
+|---|---|
+| `createPending(fileName)` | Crea record PROCESSING al submit |
+| `updateToTranscribed(id, result)` | Aggiorna PROCESSING → TRANSCRIBED con JSON sezioni |
+| `updateSections(id, chapters)` | Salva le sezioni modificate dall'utente |
+| `markIndexing(id)` | Imposta stato INDEXING |
+| `indexDocumentAsync(id)` | `@Async`: chunking + embedding + ES → INDEXED |
+| `markError(id, msg)` | Imposta stato ERROR |
+| `delete(id)` | Elimina da H2 e opzionalmente da Elasticsearch |
+
+#### Endpoint REST — `ParsedDocumentController`
+
+| Metodo | Path | Descrizione |
+|---|---|---|
+| `GET` | `/api/documents/parsed` | Lista documenti con stati |
+| `GET` | `/api/documents/parsed/{id}` | Dettaglio con sezioni (per editor) |
+| `PUT` | `/api/documents/parsed/{id}/sections` | Salva sezioni modificate |
+| `POST` | `/api/documents/parsed/{id}/index` | Avvia indicizzazione async → **202 Accepted** |
+| `DELETE` | `/api/documents/parsed/{id}` | Elimina da H2 e da ES (se indicizzato) |
 
 ---
 
@@ -179,27 +215,45 @@ il campo `result` con sezioni, tabelle, full_text e metadati.
 ```
               Java                              Python
               ─────                             ──────
-POST /index   QUEUED ──── POST /parse/async ──► QUEUED
+POST /index   crea H2 PROCESSING
+              QUEUED ──── POST /parse/async ──► QUEUED
               │                                 │
 [background]  PARSING ◄── polling GET /jobs ──  PROCESSING
               │                 (ogni 5s)        │
               │                                  │
               │           ◄── status: DONE ────  DONE (result incluso)
               │
-              INDEXING  (scrittura su Elasticsearch)
-              │
-              DONE  { chunks: N, sections: M }
+              H2: PROCESSING → TRANSCRIBED
+              job: DONE { sections: M }
+
+  (l'utente può rivedere/editare le sezioni nell'editor)
+
+  POST /api/documents/parsed/{id}/index
+              H2: TRANSCRIBED → INDEXING
+              ↓ 202 Accepted (immediato)
+
+  [thread @Async]  chunking + embedding + scrittura su ES
+              H2: INDEXING → INDEXED { chunks: N }
 ```
 
-### Tabella degli stati
+### Tabella degli stati H2 (ParsedDocument)
 
-| Stato Java | Significato |
+| Stato | Significato |
+|---|---|
+| `PROCESSING` | Record creato al submit, parsing Python in corso |
+| `TRANSCRIBED` | Parsing completato, testo e sezioni disponibili per revisione |
+| `INDEXING` | Indicizzazione asincrona avviata (chunking + embedding + ES) |
+| `INDEXED` | Documento completamente indicizzato e ricercabile |
+| `ERROR` | Fallimento in uno qualsiasi degli stadi (messaggio in `errorMessage`) |
+
+### Tabella degli stati job in-memory (DoclingJobStatus)
+
+| Stato | Significato |
 |---|---|
 | `QUEUED` | File inviato a Python, thread worker non ancora entrato nel loop |
 | `PARSING` | Thread worker attivo, polling Python in corso |
-| `INDEXING` | Python ha finito, chunking + embedding + scrittura su ES in corso |
-| `DONE` | Documento completamente indicizzato e ricercabile |
-| `ERROR` | Fallimento in uno qualsiasi degli stadi (messaggio in `error`) |
+| `DONE` | Parsing completato, record H2 aggiornato a TRANSCRIBED |
+| `ERROR` | Fallimento durante il parsing |
 
 | Stato Python | Significato |
 |---|---|

@@ -182,9 +182,9 @@ public class UploadView extends VerticalLayout {
     }
 
     private void showSuccessAndNavigate(DoclingJobStatusResponse status) {
-        String msg = status != null && status.getChunks() != null
-                ? "✅ Documento indicizzato: " + status.getChunks() + " chunks"
-                : "✅ Documento indicizzato con successo";
+        String msg = status != null && status.getSections() != null
+                ? "✅ Trascrizione completata: " + status.getSections() + " sezioni estratte. Ora puoi modificare e indicizzare."
+                : "✅ Trascrizione completata. Vai su Documenti per indicizzare.";
 
         Notification notification = Notification.show(msg, 4000, Notification.Position.MIDDLE);
         notification.addThemeVariants(NotificationVariant.LUMO_SUCCESS);

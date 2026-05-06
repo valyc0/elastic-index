@@ -157,4 +157,48 @@ public class RagApiService {
                 .bodyToMono(HealthResponse.class)
                 .block();
     }
+
+    // ============ PARSED DOCUMENTS ENDPOINTS ============
+
+    public List<ParsedDocumentSummary> getParsedDocuments() {
+        return webClient.get()
+                .uri("/api/documents/parsed")
+                .retrieve()
+                .bodyToMono(new ParameterizedTypeReference<List<ParsedDocumentSummary>>() {})
+                .block();
+    }
+
+    public ParsedDocumentDetail getParsedDocument(String id) {
+        return webClient.get()
+                .uri("/api/documents/parsed/{id}", id)
+                .retrieve()
+                .bodyToMono(ParsedDocumentDetail.class)
+                .block();
+    }
+
+    public Map<String, Object> updateSections(String id, List<ParsedDocumentDetail.ChapterSectionDto> chapters) {
+        return webClient.put()
+                .uri("/api/documents/parsed/{id}/sections", id)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of("chapters", chapters))
+                .retrieve()
+                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                .block();
+    }
+
+    public Map<String, Object> indexParsedDocument(String id) {
+        return webClient.post()
+                .uri("/api/documents/parsed/{id}/index", id)
+                .retrieve()
+                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                .block();
+    }
+
+    public Map<String, Object> deleteParsedDocument(String id) {
+        return webClient.delete()
+                .uri("/api/documents/parsed/{id}", id)
+                .retrieve()
+                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                .block();
+    }
 }

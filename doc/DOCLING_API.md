@@ -179,3 +179,5 @@ DOCLING_URL=http://altro-host:8001 ./bin/test-docling-api.sh documento.pdf
 ```
 
 Il JSON completo viene salvato in `/tmp/docling-parse-<nome>.json`.
+
+---

@@ -4,6 +4,7 @@ import io.bootify.my_app.model.DoclingJobStatus;
 import io.bootify.my_app.model.DoclingParseResponse;
 import io.bootify.my_app.model.DoclingPythonJobStatus;
 import io.bootify.my_app.model.DocumentExtractionResult;
+import io.bootify.my_app.service.ParsedDocumentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -50,14 +51,14 @@ public class DoclingJobService {
 
     private final Map<String, DoclingJobStatus> jobs = new ConcurrentHashMap<>();
     private final DoclingClient doclingClient;
-    private final SemanticIndexService semanticIndexService;
+    private final ParsedDocumentService parsedDocumentService;
     private final ExecutorService executor;
     private final ScheduledExecutorService scheduler;
 
     public DoclingJobService(DoclingClient doclingClient,
-                              SemanticIndexService semanticIndexService) {
+                              ParsedDocumentService parsedDocumentService) {
         this.doclingClient = doclingClient;
-        this.semanticIndexService = semanticIndexService;
+        this.parsedDocumentService = parsedDocumentService;
 
         this.executor = Executors.newCachedThreadPool(r -> {
             Thread t = new Thread(r, "docling-job-worker");
@@ -84,8 +85,17 @@ public class DoclingJobService {
         String fileName = file.getOriginalFilename() != null
                 ? file.getOriginalFilename() : "document";
 
+        // Crea subito il record su H2 con stato PROCESSING (visibile all'utente)
+        String pendingDocId = parsedDocumentService.createPending(fileName);
+
         // Invia a Python (bloccante ma veloce: solo submission, non elaborazione)
-        String pythonJobId = doclingClient.submitParseAsync(file);
+        String pythonJobId;
+        try {
+            pythonJobId = doclingClient.submitParseAsync(file);
+        } catch (Exception e) {
+            parsedDocumentService.markError(pendingDocId, "Errore submit a Docling: " + e.getMessage());
+            throw e;
+        }
 
         // Crea il job Java
         String javaJobId = UUID.randomUUID().toString();
@@ -97,10 +107,11 @@ public class DoclingJobService {
         job.setUpdatedAt(System.currentTimeMillis());
         jobs.put(javaJobId, job);
 
-        log.info("Job avviato: javaJobId={}, pythonJobId={}, file={}", javaJobId, pythonJobId, fileName);
+        log.info("Job avviato: javaJobId={}, pythonJobId={}, pendingDocId={}, file={}",
+                javaJobId, pythonJobId, pendingDocId, fileName);
 
         // Avvia il thread di background per il polling + indicizzazione
-        Future<?> future = executor.submit(() -> processJob(javaJobId, pythonJobId, fileName));
+        Future<?> future = executor.submit(() -> processJob(javaJobId, pythonJobId, fileName, pendingDocId));
         // Loggare eccezioni non catturate che altrimenti sarebbero silenziate
         executor.submit(() -> {
             try {
@@ -136,7 +147,7 @@ public class DoclingJobService {
 
     // ── Background processing ────────────────────────────────────────────────
 
-    private void processJob(String javaJobId, String pythonJobId, String fileName) {
+    private void processJob(String javaJobId, String pythonJobId, String fileName, String pendingDocId) {
         // Pulisce il flag interrupt in caso di riutilizzo di thread con stato inconsistente
         boolean wasInterrupted = Thread.interrupted();
         if (wasInterrupted) {
@@ -162,7 +173,7 @@ public class DoclingJobService {
                     Thread.sleep(POLL_INTERVAL_MS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    markError(job, "Interrupted");
+                    markError(job, pendingDocId, "Interrupted");
                     return;
                 }
 
@@ -179,7 +190,7 @@ public class DoclingJobService {
                 if ("DONE".equals(pythonStatusStr)) {
                     DoclingParseResponse result = pythonStatus.getResult();
                     if (result == null) {
-                        markError(job, "Python DONE ma nessun risultato restituito");
+                        markError(job, pendingDocId, "Python DONE ma nessun risultato restituito");
                         return;
                     }
                     extracted = doclingClient.convertResult(result, fileName);
@@ -187,38 +198,45 @@ public class DoclingJobService {
                 } else if ("ERROR".equals(pythonStatusStr)) {
                     String err = pythonStatus.getError() != null
                             ? pythonStatus.getError() : "Errore parsing Python";
-                    markError(job, err);
+                    markError(job, pendingDocId, err);
                     return;
                 }
                 // QUEUED o PROCESSING: continua il polling
             }
 
             if (extracted == null) {
-                markError(job, "Timeout: parsing non completato entro "
+                markError(job, pendingDocId, "Timeout: parsing non completato entro "
                         + (MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS / 1000) + "s");
                 return;
             }
 
-            // Indicizzazione in Elasticsearch
-            job.setStatus("INDEXING");
-            job.setUpdatedAt(System.currentTimeMillis());
-
-            String documentId = UUID.randomUUID().toString();
-            int chunks = semanticIndexService.indexDocument(documentId, extracted);
+            // Aggiorna il record H2 da PROCESSING a TRANSCRIBED con i dati estratti
             int sectionCount = extracted.getChapters() != null ? extracted.getChapters().size() : 0;
+            parsedDocumentService.updateToTranscribed(pendingDocId, extracted);
 
             job.setStatus("DONE");
-            job.setChunks(chunks);
             job.setSections(sectionCount);
-            job.setMessage("Documento indicizzato: " + chunks + " chunks da " + sectionCount + " sezioni");
+            job.setMessage("Trascrizione completata: " + sectionCount + " sezioni estratte. Documento pronto per revisione.");
             job.setUpdatedAt(System.currentTimeMillis());
 
-            log.info("Job completato: javaJobId={}, documentId={}, chunks={}, sezioni={}",
-                    javaJobId, documentId, chunks, sectionCount);
+            log.info("Job completato: javaJobId={}, parsedDocId={}, sezioni={}",
+                    javaJobId, pendingDocId, sectionCount);
 
         } catch (Exception e) {
             log.error("Errore nel job {}: {}", javaJobId, e.getMessage(), e);
-            markError(job, e.getMessage());
+            markError(job, pendingDocId, e.getMessage());
+        }
+    }
+
+    private void markError(DoclingJobStatus job, String pendingDocId, String error) {
+        job.setStatus("ERROR");
+        job.setError(error);
+        job.setUpdatedAt(System.currentTimeMillis());
+        log.error("Job {} fallito: {}", job.getJobId(), error);
+        try {
+            parsedDocumentService.markError(pendingDocId, error);
+        } catch (Exception ex) {
+            log.warn("Impossibile aggiornare stato ERROR su H2 per pendingDocId={}: {}", pendingDocId, ex.getMessage());
         }
     }
 

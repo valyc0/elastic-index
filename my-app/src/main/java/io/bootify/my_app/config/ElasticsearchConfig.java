@@ -8,11 +8,13 @@ import org.elasticsearch.client.RestClient;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableAsync;
 
 import java.net.URI;
 import java.util.Arrays;
 
 @Configuration
+@EnableAsync
 public class ElasticsearchConfig {
 
     /** Supporta lista separata da virgole, es. "http://es1:9200,http://es2:9200". */
