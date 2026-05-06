@@ -15,8 +15,8 @@
 
     <properties>
         <java.version>21</java.version>
-        <elasticsearch-java.version>8.11.3</elasticsearch-java.version>
-        <elasticsearch-rest-client.version>8.11.3</elasticsearch-rest-client.version>
+        <elasticsearch-java.version>8.17.8</elasticsearch-java.version>
+        <elasticsearch-rest-client.version>8.17.8</elasticsearch-rest-client.version>
     </properties>
 
     <dependencies>
@@ -31,12 +31,12 @@
         <dependency>
             <groupId>org.apache.tika</groupId>
             <artifactId>tika-core</artifactId>
-            <version>2.9.1</version>
+            <version>3.3.0</version>
         </dependency>
         <dependency>
             <groupId>org.apache.tika</groupId>
             <artifactId>tika-parsers-standard-package</artifactId>
-            <version>2.9.1</version>
+            <version>3.3.0</version>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -45,13 +45,13 @@
         <dependency>
             <groupId>org.apache.tika</groupId>
             <artifactId>tika-langdetect-optimaize</artifactId>
-            <version>2.9.1</version>
+            <version>3.3.0</version>
         </dependency>
         <!-- PDFBox - estrazione struttura outline/capitoli da PDF (già transitivo via Tika) -->
         <dependency>
             <groupId>org.apache.pdfbox</groupId>
             <artifactId>pdfbox</artifactId>
-            <version>2.0.29</version>
+            <version>2.0.36</version>
         </dependency>
         <dependency>
             <groupId>com.knuddels</groupId>
