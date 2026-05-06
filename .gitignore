@@ -15,8 +15,9 @@ buildNumber.properties
 .settings/
 .project
 .classpath
-bin/
 tmp/
+# Eclipse build output (evita di escludere bin/ degli script shell)
+**/eclipse-bin/
 *.tmp
 *.bak
 *.swp
