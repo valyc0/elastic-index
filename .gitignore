@@ -15,6 +15,7 @@ buildNumber.properties
 .settings/
 .project
 .classpath
+.factorypath
 tmp/
 # Eclipse build output (evita di escludere bin/ degli script shell)
 **/eclipse-bin/

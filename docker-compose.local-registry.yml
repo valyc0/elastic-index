@@ -1,0 +1,105 @@
+services:
+  elasticsearch:
+    image: elasticsearch:8.11.3
+    container_name: elasticsearch
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=docker-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - xpack.ml.enabled=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    networks:
+      - elastic
+
+  kibana:
+    image: kibana:8.11.3
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    networks:
+      - elastic
+    depends_on:
+      - elasticsearch
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - elastic
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - elastic
+    command: redis-server --save 60 1 --loglevel warning
+
+  docling-service:
+    build:
+      context: ./docling-service
+      dockerfile: Dockerfile
+    container_name: docling-service
+    ports:
+      - "8001:8001"
+    networks:
+      - elastic
+    depends_on:
+      - redis
+    environment:
+      - REDIS_URL=redis://redis:6379
+      # Numero di thread CPU per modello (default: tutti i core del container)
+      - DOCLING_THREADS=${DOCLING_THREADS:-12}
+      # Conversioni simultanee — ogni worker carica i modelli in RAM (~2-3GB ciascuno)
+      # Su macchine con poca RAM tenere a 1; aumentare solo con GPU o >32GB RAM
+      - DOCLING_MAX_CONCURRENT=${DOCLING_MAX_CONCURRENT:-1}
+      # Timeout per singola conversione in secondi
+      - DOCLING_TIMEOUT_SEC=${DOCLING_TIMEOUT_SEC:-900}
+      # Dimensione massima file in MB
+      - DOCLING_MAX_FILE_MB=${DOCLING_MAX_FILE_MB:-100}
+      # Dispositivo: cpu, cuda, mps
+      - DOCLING_DEVICE=${DOCLING_DEVICE:-cpu}
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  elasticsearch-data:
+    driver: local
+  ollama-data:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  elastic:
+    driver: bridge
