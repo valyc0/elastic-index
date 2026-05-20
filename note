@@ -1,0 +1,8 @@
+https://hub.docker.com/r/valyc1/ollama-custom
+
+docker run -d \
+  --name ollama \
+  --gpus all \
+  -p 11434:11434 \
+  -v ollama:/root/.ollama \
+  valyc1/ollama-custom:latest
